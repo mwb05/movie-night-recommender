@@ -1,4 +1,3 @@
-import math
 import os
 
 import requests
@@ -27,10 +26,13 @@ def tmdb_get(endpoint: str, params: dict | None = None) -> dict:
 
 
 @st.cache_data(show_spinner=False)
-def load_genres() -> tuple[dict[str, int], list[str]]:
+def load_genres() -> tuple[dict[str, str], list[str]]:
     data = tmdb_get("/genre/movie/list", {"language": "en-US"})
     genres = data["genres"]
-    genre_map = {genre["name"]: genre["id"] for genre in genres}
+    genre_map = {genre["name"]: str(genre["id"]) for genre in genres}
+    if "Comedy" in genre_map and "Romance" in genre_map:
+        # Treat romcom as movies tagged with both Comedy and Romance.
+        genre_map["Romcom"] = f"{genre_map['Comedy']},{genre_map['Romance']}"
     genre_names = ["Any"] + sorted(genre_map.keys())
     return genre_map, genre_names
 
@@ -65,11 +67,12 @@ def find_actor_id(actor_name: str) -> int | None:
 
 def build_discover_params(
     genre_value: str,
+    extra_genres: list[str],
     actor_value: str,
+    year_mode: str,
     year_value: str,
     language_value: str,
-    min_rating: float,
-    genre_map: dict[str, int],
+    genre_map: dict[str, str],
     page_number: int,
 ) -> dict:
     params = {
@@ -79,8 +82,18 @@ def build_discover_params(
         "page": page_number,
     }
 
+    selected_genres = []
     if genre_value != "Any":
-        params["with_genres"] = genre_map[genre_value]
+        selected_genres.append(genre_map[genre_value])
+    for genre_name in extra_genres:
+        if genre_name != "Any":
+            selected_genres.append(genre_map[genre_name])
+    if selected_genres:
+        unique_ids = []
+        for genre_id in selected_genres:
+            if genre_id not in unique_ids:
+                unique_ids.append(genre_id)
+        params["with_genres"] = ",".join(unique_ids)
 
     actor_value = actor_value.strip()
     if actor_value:
@@ -93,26 +106,30 @@ def build_discover_params(
     if year_value:
         if not year_value.isdigit() or len(year_value) != 4:
             raise ValueError("Release Year must be blank or a 4-digit year like 2020.")
-        params["primary_release_year"] = int(year_value)
+        year_number = int(year_value)
+        if year_mode == "Exact year":
+            params["primary_release_year"] = year_number
+        elif year_mode == "Year and newer":
+            params["primary_release_date.gte"] = f"{year_number}-01-01"
+        elif year_mode == "Year and older":
+            params["primary_release_date.lte"] = f"{year_number}-12-31"
 
     if language_value != "Any":
         params["with_original_language"] = language_value
 
-    if min_rating > 0:
-        params["vote_average.gte"] = min_rating
-
     return params
 
 
-def fetch_recommendation_page(filters: dict, genre_map: dict[str, int], page_number: int) -> tuple[list[dict], int]:
+def fetch_recommendation_page(filters: dict, genre_map: dict[str, str], page_number: int) -> tuple[list[dict], int]:
     data = tmdb_get(
         "/discover/movie",
         build_discover_params(
             filters["genre"],
+            filters["extra_genres"],
             filters["actor"],
+            filters["year_mode"],
             filters["year"],
             filters["language"],
-            filters["min_rating"],
             genre_map,
             page_number,
         ),
@@ -135,7 +152,7 @@ def reset_state_for_new_search() -> None:
     st.session_state.search_error = ""
 
 
-def load_page(filters: dict, genre_map: dict[str, int], page_number: int) -> None:
+def load_page(filters: dict, genre_map: dict[str, str], page_number: int) -> None:
     try:
         results, total_pages = fetch_recommendation_page(filters, genre_map, page_number)
         wrapped = False
@@ -208,18 +225,24 @@ def main() -> None:
 
     with st.form("movie_filters"):
         genre = st.selectbox("Genre", genre_options, index=0)
+        extra_genres = st.multiselect(
+            "More Genres",
+            [genre for genre in genre_options if genre != "Any"],
+            placeholder="Optional: pick more genres",
+        )
         actor = st.text_input("Actor", placeholder="Leave blank for any actor")
-        year = st.text_input("Release Year", placeholder="Example: 2020")
-        min_rating = st.slider("Min Rating", min_value=0.0, max_value=10.0, value=6.0, step=0.5)
+        year_mode = st.selectbox("Release Year", ["Any", "Exact year", "Year and newer", "Year and older"], index=0)
+        year = st.text_input("Year value", placeholder="Example: 2020")
         language_label_value = st.selectbox("Language", [label for label, _ in language_options], index=0)
         submitted = st.form_submit_button("Get Recommendations", use_container_width=True)
 
     filters = {
         "genre": genre,
+        "extra_genres": extra_genres,
         "actor": actor,
+        "year_mode": year_mode,
         "year": year,
         "language": language_codes[language_label_value],
-        "min_rating": min_rating,
     }
 
     if submitted:
@@ -236,10 +259,14 @@ def main() -> None:
 
     if current_filters:
         st.markdown("### Selected Filters")
-        st.write(f"Genre: {current_filters['genre']}")
+        genre_parts = [current_filters["genre"]] if current_filters["genre"] != "Any" else []
+        genre_parts.extend(current_filters["extra_genres"])
+        st.write(f"Genre: {', '.join(genre_parts) if genre_parts else 'Any'}")
         st.write(f"Actor: {current_filters['actor'].strip() or 'Any'}")
-        st.write(f"Release Year: {current_filters['year'].strip() or 'Any'}")
-        st.write(f"Min Rating: {current_filters['min_rating']:.1f}")
+        if current_filters["year"].strip():
+            st.write(f"Release Year: {current_filters['year_mode']} {current_filters['year'].strip()}")
+        else:
+            st.write("Release Year: Any")
         st.write(f"Language: {language_label(language_options, current_filters['language'])}")
         st.write(f"Page: {max(st.session_state.current_page, 1)} of {max(st.session_state.total_pages, 1)}")
 
@@ -270,7 +297,6 @@ def main() -> None:
             st.markdown("### Movie Details")
             st.subheader(details["title"])
             st.write(f"Release Date: {details.get('release_date', 'N/A')}")
-            st.write(f"Rating: {details.get('vote_average', 0):.1f}/10")
             st.write(f"Runtime: {details.get('runtime', 'N/A')} minutes")
             st.write(f"Genres: {', '.join(genres) if genres else 'N/A'}")
             st.write(f"Top Cast: {', '.join(top_cast) if top_cast else 'N/A'}")
