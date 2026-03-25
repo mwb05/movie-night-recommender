@@ -202,7 +202,7 @@ def ensure_state() -> None:
         "search_message": "",
         "search_error": "",
         "filters": None,
-        "extra_genre_count": 0,
+        "extra_genres_list": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -232,17 +232,18 @@ def main() -> None:
         st.write("")
         st.write("")
         if st.button("+ Add Genre", use_container_width=True):
-            st.session_state.extra_genre_count += 1
+            st.session_state.extra_genres_list.append(addable_genres[0])
             st.rerun()
 
     extra_genres = []
-    for index in range(st.session_state.extra_genre_count):
+    for index, current_genre in enumerate(st.session_state.extra_genres_list):
         extra_genre_col, remove_genre_col = st.columns([4, 1.3])
         with extra_genre_col:
             extra_genres.append(
                 st.selectbox(
                     f"Extra Genre {index + 1}",
                     addable_genres,
+                    index=addable_genres.index(current_genre) if current_genre in addable_genres else 0,
                     key=f"extra_genre_{index}",
                 )
             )
@@ -250,16 +251,13 @@ def main() -> None:
             st.write("")
             st.write("")
             if st.button("Remove", key=f"remove_extra_genre_{index}", use_container_width=True):
-                for shift_index in range(index, st.session_state.extra_genre_count - 1):
-                    next_key = f"extra_genre_{shift_index + 1}"
-                    current_key = f"extra_genre_{shift_index}"
-                    if next_key in st.session_state:
-                        st.session_state[current_key] = st.session_state[next_key]
-                last_key = f"extra_genre_{st.session_state.extra_genre_count - 1}"
-                if last_key in st.session_state:
-                    del st.session_state[last_key]
-                st.session_state.extra_genre_count -= 1
+                st.session_state.extra_genres_list.pop(index)
+                stale_key = f"extra_genre_{len(st.session_state.extra_genres_list)}"
+                if stale_key in st.session_state:
+                    del st.session_state[stale_key]
                 st.rerun()
+
+    st.session_state.extra_genres_list = list(extra_genres)
 
     actor = st.text_input("Actor", placeholder="Leave blank for any actor")
     year_mode = st.selectbox("Year Filter", ["Any", "Exactly", "Or Newer", "Or Older"], index=0)
