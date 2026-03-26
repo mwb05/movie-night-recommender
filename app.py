@@ -437,6 +437,23 @@ def main() -> None:
             next_page = 1
         load_page(current_filters, genre_map, next_page)
 
+    if st.session_state.search_error:
+        st.error(st.session_state.search_error)
+    elif st.session_state.search_message:
+        st.info(st.session_state.search_message)
+
+    recommendations = st.session_state.recommendations
+    if recommendations and st.session_state.selected_movie_id is None:
+        st.markdown('<div class="results-card">', unsafe_allow_html=True)
+        st.markdown("### Recommendations")
+        for index, movie in enumerate(recommendations, start=1):
+            year_value = movie.get("release_date", "")[:4] if movie.get("release_date") else "N/A"
+            label = f"{index}. {movie['title']} ({year_value})"
+            if st.button(label, key=f"movie_{movie['id']}", use_container_width=True):
+                st.session_state.selected_movie_id = movie["id"]
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
     if current_filters:
         st.markdown("### Selected Filters")
         genre_parts = [current_filters["genre"]] if current_filters["genre"] != "Any" else []
@@ -455,23 +472,6 @@ def main() -> None:
             st.write("Release Year: Any")
         st.write(f"Language: {language_label(language_options, current_filters['language'])}")
         st.write(f"Page: {max(st.session_state.current_page, 1)} of {max(st.session_state.total_pages, 1)}")
-
-    if st.session_state.search_error:
-        st.error(st.session_state.search_error)
-    elif st.session_state.search_message:
-        st.info(st.session_state.search_message)
-
-    recommendations = st.session_state.recommendations
-    if recommendations and st.session_state.selected_movie_id is None:
-        st.markdown('<div class="results-card">', unsafe_allow_html=True)
-        st.markdown("### Recommendations")
-        for index, movie in enumerate(recommendations, start=1):
-            year_value = movie.get("release_date", "")[:4] if movie.get("release_date") else "N/A"
-            label = f"{index}. {movie['title']} ({year_value})"
-            if st.button(label, key=f"movie_{movie['id']}", use_container_width=True):
-                st.session_state.selected_movie_id = movie["id"]
-                st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
 
     if st.session_state.selected_movie_id is not None:
         movie_id = st.session_state.selected_movie_id
