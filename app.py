@@ -5,6 +5,7 @@ import streamlit as st
 
 
 BASE_URL = "https://api.themoviedb.org/3"
+POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
 
 
 def get_api_key() -> str | None:
@@ -210,11 +211,79 @@ def ensure_state() -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Movie Night Recommender", page_icon="🎬", layout="centered")
+    st.set_page_config(page_title="Movie Recommender", page_icon="🎬", layout="centered")
     ensure_state()
 
-    st.title("Movie Night Recommender")
-    st.write("Choose optional filters, get movie suggestions, and open one for more details.")
+    st.markdown(
+        """
+        <style>
+        .hero-card {
+            padding: 1.6rem 1.4rem 1.2rem 1.4rem;
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            border-radius: 22px;
+            background:
+                radial-gradient(circle at top left, rgba(244, 114, 182, 0.18), transparent 28%),
+                radial-gradient(circle at top right, rgba(96, 165, 250, 0.20), transparent 24%),
+                linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(17, 24, 39, 0.92));
+            margin-bottom: 1rem;
+        }
+        .hero-kicker {
+            color: #fda4af;
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 0.5rem;
+        }
+        .hero-title {
+            color: #f8fafc;
+            font-size: 2.4rem;
+            font-weight: 800;
+            line-height: 1.0;
+            margin: 0 0 0.7rem 0;
+        }
+        .hero-subtitle {
+            color: #cbd5e1;
+            font-size: 1rem;
+            margin: 0;
+        }
+        .section-label {
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #94a3b8;
+            margin-top: 0.4rem;
+            margin-bottom: 0.35rem;
+        }
+        .filters-card {
+            padding: 1.1rem 1rem 0.8rem 1rem;
+            border-radius: 20px;
+            border: 1px solid rgba(148, 163, 184, 0.14);
+            background: rgba(15, 23, 42, 0.45);
+            margin-bottom: 1rem;
+        }
+        .results-card {
+            padding: 1rem 1rem 0.6rem 1rem;
+            border-radius: 20px;
+            border: 1px solid rgba(148, 163, 184, 0.14);
+            background: rgba(15, 23, 42, 0.35);
+            margin-top: 1rem;
+        }
+        @media (max-width: 640px) {
+            .hero-title {
+                font-size: 1.85rem;
+            }
+        }
+        </style>
+        <div class="hero-card">
+            <div class="hero-kicker">Discover Something Great</div>
+            <div class="hero-title">Movie Recommender</div>
+            <p class="hero-subtitle">Choose a few filters, explore recommendation batches, and open any movie for a quick breakdown.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if not TMDB_API_KEY:
         st.error("TMDB_API_KEY is missing. Add it to Streamlit secrets before deploying.")
@@ -225,19 +294,20 @@ def main() -> None:
     language_codes = {label: code for label, code in language_options}
     addable_genres = [genre for genre in genre_options if genre != "Any"]
 
-    genre_col, add_genre_col = st.columns([4, 1.3])
+    st.markdown('<div class="filters-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">Filters</div>', unsafe_allow_html=True)
+
+    genre_col, add_genre_col = st.columns([4, 1.3], vertical_alignment="bottom")
     with genre_col:
         genre = st.selectbox("Genre", genre_options, index=0)
     with add_genre_col:
-        st.write("")
-        st.write("")
         if st.button("+ Add Genre", use_container_width=True):
             st.session_state.extra_genres_list.append(addable_genres[0])
             st.rerun()
 
     extra_genres = []
     for index, current_genre in enumerate(st.session_state.extra_genres_list):
-        extra_genre_col, remove_genre_col = st.columns([4, 1.3])
+        extra_genre_col, remove_genre_col = st.columns([4, 1.3], vertical_alignment="bottom")
         with extra_genre_col:
             extra_genres.append(
                 st.selectbox(
@@ -248,8 +318,6 @@ def main() -> None:
                 )
             )
         with remove_genre_col:
-            st.write("")
-            st.write("")
             if st.button("Remove", key=f"remove_extra_genre_{index}", use_container_width=True):
                 st.session_state.extra_genres_list.pop(index)
                 stale_key = f"extra_genre_{len(st.session_state.extra_genres_list)}"
@@ -260,14 +328,19 @@ def main() -> None:
     st.session_state.extra_genres_list = list(extra_genres)
 
     actor = st.text_input("Actor", placeholder="Leave blank for any actor")
-    year_mode = st.selectbox("Year Filter", ["Any", "Exactly", "Or Newer", "Or Older"], index=0)
-    year = st.text_input(
-        "Year",
-        placeholder="Example: 2020",
-        disabled=year_mode == "Any",
-    )
+    year_filter_col, year_value_col = st.columns(2)
+    with year_filter_col:
+        year_mode = st.selectbox("Year Filter", ["Any", "Exactly", "Or Newer", "Or Older"], index=0)
+    with year_value_col:
+        year = st.text_input(
+            "Year",
+            placeholder="Example: 2020",
+            disabled=year_mode == "Any",
+        )
+
     language_label_value = st.selectbox("Language", [label for label, _ in language_options], index=0)
-    submitted = st.button("Get Recommendations", use_container_width=True)
+    submitted = st.button("Get Recommendations", type="primary", use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
     filters = {
         "genre": genre,
@@ -310,6 +383,7 @@ def main() -> None:
 
     recommendations = st.session_state.recommendations
     if recommendations and st.session_state.selected_movie_id is None:
+        st.markdown('<div class="results-card">', unsafe_allow_html=True)
         st.markdown("### Recommendations")
         for index, movie in enumerate(recommendations, start=1):
             year_value = movie.get("release_date", "")[:4] if movie.get("release_date") else "N/A"
@@ -317,6 +391,7 @@ def main() -> None:
             if st.button(label, key=f"movie_{movie['id']}", use_container_width=True):
                 st.session_state.selected_movie_id = movie["id"]
                 st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
     if st.session_state.selected_movie_id is not None:
         movie_id = st.session_state.selected_movie_id
@@ -328,13 +403,19 @@ def main() -> None:
             genres = [genre["name"] for genre in details.get("genres", [])]
 
             st.markdown("### Movie Details")
-            st.subheader(details["title"])
-            st.write(f"Release Date: {details.get('release_date', 'N/A')}")
-            st.write(f"Runtime: {details.get('runtime', 'N/A')} minutes")
-            st.write(f"Genres: {', '.join(genres) if genres else 'N/A'}")
-            st.write(f"Top Cast: {', '.join(top_cast) if top_cast else 'N/A'}")
-            st.write("Description:")
-            st.write(details.get("overview") or "No description available.")
+            poster_path = details.get("poster_path")
+            details_col, poster_col = st.columns([2.2, 1], vertical_alignment="top")
+            with details_col:
+                st.subheader(details["title"])
+                st.write(f"Release Date: {details.get('release_date', 'N/A')}")
+                st.write(f"Runtime: {details.get('runtime', 'N/A')} minutes")
+                st.write(f"Genres: {', '.join(genres) if genres else 'N/A'}")
+                st.write(f"Top Cast: {', '.join(top_cast) if top_cast else 'N/A'}")
+                st.write("Description:")
+                st.write(details.get("overview") or "No description available.")
+            with poster_col:
+                if poster_path:
+                    st.image(f"{POSTER_BASE_URL}{poster_path}", use_container_width=True)
         except Exception as error:
             st.error(str(error))
 
