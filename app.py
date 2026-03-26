@@ -54,7 +54,29 @@ def load_languages() -> list[tuple[str, str]]:
 
 
 def load_us_certifications() -> list[str]:
-    return ["G", "PG", "PG-13", "R", "NC-17"]
+    return ["G", "PG", "PG-13", "R"]
+
+
+@st.cache_data(show_spinner=False)
+def load_watch_providers() -> dict[str, str]:
+    data = tmdb_get("/watch/providers/movie", {"watch_region": "US", "language": "en-US"})
+    results = data.get("results", [])
+    provider_lookup = {provider["provider_name"]: str(provider["provider_id"]) for provider in results}
+    alias_map = {
+        "Netflix": "Netflix",
+        "Disney+": "Disney Plus",
+        "Hulu": "Hulu",
+        "Max": "Max",
+        "Peacock": "Peacock Premium",
+        "Paramount+": "Paramount Plus",
+        "Prime Video": "Amazon Prime Video",
+        "Apple TV": "Apple TV Plus",
+    }
+    return {
+        app_label: provider_lookup[tmdb_name]
+        for app_label, tmdb_name in alias_map.items()
+        if tmdb_name in provider_lookup
+    }
 
 
 @st.cache_data(show_spinner=False)
@@ -75,6 +97,7 @@ def build_discover_params(
     extra_genres: list[str],
     actor_value: str,
     certifications: list[str],
+    providers: list[str],
     year_mode: str,
     year_value: str,
     language_value: str,
@@ -108,9 +131,15 @@ def build_discover_params(
             raise ValueError(f"No actor found for '{actor_value}'. Try a different spelling.")
         params["with_cast"] = actor_id
 
+    params["certification_country"] = "US"
+    params["certification.lte"] = "R"
+
     if certifications:
-        params["certification_country"] = "US"
         params["certification"] = "|".join(certifications)
+
+    if providers:
+        params["watch_region"] = "US"
+        params["with_watch_providers"] = "|".join(providers)
 
     year_value = year_value.strip()
     if year_value:
@@ -138,6 +167,7 @@ def fetch_recommendation_page(filters: dict, genre_map: dict[str, str], page_num
             filters["extra_genres"],
             filters["actor"],
             filters["certifications"],
+            filters["providers"],
             filters["year_mode"],
             filters["year"],
             filters["language"],
@@ -304,6 +334,8 @@ def main() -> None:
     language_codes = {label: code for label, code in language_options}
     addable_genres = [genre for genre in genre_options if genre != "Any"]
     certification_options = load_us_certifications()
+    provider_map = load_watch_providers()
+    provider_options = list(provider_map.keys())
 
     st.markdown('<div class="filters-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-label">Filters</div>', unsafe_allow_html=True)
@@ -346,6 +378,13 @@ def main() -> None:
         with column:
             if st.checkbox(cert, key=f"cert_{cert}"):
                 selected_certifications.append(cert)
+    st.markdown('<div class="section-label">Streaming Services (US)</div>', unsafe_allow_html=True)
+    provider_columns = st.columns(2)
+    selected_providers = []
+    for index, provider_name in enumerate(provider_options):
+        with provider_columns[index % 2]:
+            if st.checkbox(provider_name, key=f"provider_{provider_name}"):
+                selected_providers.append(provider_map[provider_name])
     year_filter_col, year_value_col = st.columns(2)
     with year_filter_col:
         year_mode = st.selectbox("Year Filter", ["Any", "Exactly", "Or Newer", "Or Older"], index=0)
@@ -365,6 +404,7 @@ def main() -> None:
         "extra_genres": extra_genres,
         "actor": actor,
         "certifications": selected_certifications,
+        "providers": selected_providers,
         "year_mode": year_mode,
         "year": year,
         "language": language_codes[language_label_value],
@@ -389,6 +429,11 @@ def main() -> None:
         st.write(f"Genre: {', '.join(genre_parts) if genre_parts else 'Any'}")
         st.write(f"Actor: {current_filters['actor'].strip() or 'Any'}")
         st.write(f"Allowed Ratings: {', '.join(current_filters['certifications']) if current_filters['certifications'] else 'Any'}")
+        selected_provider_labels = [
+            provider_name for provider_name, provider_id in provider_map.items()
+            if provider_id in current_filters["providers"]
+        ]
+        st.write(f"Streaming Services: {', '.join(selected_provider_labels) if selected_provider_labels else 'Any'}")
         if current_filters["year"].strip():
             st.write(f"Release Year: {current_filters['year'].strip()} {current_filters['year_mode']}")
         else:
@@ -443,7 +488,7 @@ def main() -> None:
             st.session_state.selected_movie_id = None
             st.rerun()
 
-    st.caption("Powered by TMDb. Narrow filters can produce only one result page.")
+    st.caption("Powered by TMDb. Streaming provider data is supplied via TMDb/JustWatch. Narrow filters can produce only one result page.")
 
 
 if __name__ == "__main__":
