@@ -63,20 +63,27 @@ def load_watch_providers() -> dict[str, str]:
     results = data.get("results", [])
     provider_lookup = {provider["provider_name"]: str(provider["provider_id"]) for provider in results}
     alias_map = {
-        "Netflix": "Netflix",
-        "Disney+": "Disney Plus",
-        "Hulu": "Hulu",
-        "Max": "Max",
-        "Peacock": "Peacock Premium",
-        "Paramount+": "Paramount Plus",
-        "Prime Video": "Amazon Prime Video",
-        "Apple TV": "Apple TV Plus",
+        "Netflix": ["Netflix"],
+        "Disney+": ["Disney Plus", "Disney+"],
+        "Hulu": ["Hulu"],
+        "Max": ["Max", "HBO Max"],
+        "Peacock": ["Peacock Premium", "Peacock"],
+        "Paramount+": ["Paramount Plus", "Paramount+"],
+        "Prime Video": ["Amazon Prime Video", "Prime Video"],
+        "Apple TV": ["Apple TV Plus", "Apple TV+"],
     }
-    return {
-        app_label: provider_lookup[tmdb_name]
-        for app_label, tmdb_name in alias_map.items()
-        if tmdb_name in provider_lookup
-    }
+    resolved_map: dict[str, str] = {}
+    for app_label, candidates in alias_map.items():
+        for candidate in candidates:
+            if candidate in provider_lookup:
+                resolved_map[app_label] = provider_lookup[candidate]
+                break
+    return resolved_map
+
+
+@st.cache_data(show_spinner=False)
+def fetch_movie_watch_providers(movie_id: int) -> dict:
+    return tmdb_get(f"/movie/{movie_id}/watch/providers")
 
 
 @st.cache_data(show_spinner=False)
@@ -464,8 +471,16 @@ def main() -> None:
             payload = fetch_movie_details(movie_id)
             details = payload["details"]
             credits = payload["credits"]
+            provider_payload = fetch_movie_watch_providers(movie_id)
             top_cast = [member["name"] for member in credits.get("cast", [])[:5]]
             genres = [genre["name"] for genre in details.get("genres", [])]
+            us_provider_data = provider_payload.get("results", {}).get("US", {})
+            flatrate_providers = us_provider_data.get("flatrate", [])
+            buy_providers = us_provider_data.get("buy", [])
+            rent_providers = us_provider_data.get("rent", [])
+            provider_names = [provider["provider_name"] for provider in flatrate_providers]
+            buy_provider_names = [provider["provider_name"] for provider in buy_providers]
+            rent_provider_names = [provider["provider_name"] for provider in rent_providers]
 
             st.markdown("### Movie Details")
             poster_path = details.get("poster_path")
@@ -476,6 +491,9 @@ def main() -> None:
                 st.write(f"Runtime: {details.get('runtime', 'N/A')} minutes")
                 st.write(f"Genres: {', '.join(genres) if genres else 'N/A'}")
                 st.write(f"Top Cast: {', '.join(top_cast) if top_cast else 'N/A'}")
+                st.write(f"Streaming On (US): {', '.join(provider_names) if provider_names else 'Not listed for streaming'}")
+                if not provider_names and (buy_provider_names or rent_provider_names):
+                    st.write(f"Buy/Rent On (US): {', '.join(buy_provider_names or rent_provider_names)}")
                 st.write("Description:")
                 st.write(details.get("overview") or "No description available.")
             with poster_col:
