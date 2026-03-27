@@ -407,6 +407,11 @@ def find_actor_id(actor_name: str) -> int | None:
     results = data.get("results", [])
     if not results:
         return None
+
+    lowered_name = actor_name.lower()
+    for result in results:
+        if result.get("name", "").strip().lower() == lowered_name:
+            return result["id"]
     return results[0]["id"]
 
 
@@ -482,11 +487,11 @@ def build_discover_params(
         if not year_value.isdigit() or len(year_value) != 4:
             raise ValueError("Release Year must be blank or a 4-digit year like 2020.")
         year_number = int(year_value)
-        if year_mode == "Exact year":
+        if year_mode == "Exactly":
             params["primary_release_year"] = year_number
-        elif year_mode == "Year and newer":
+        elif year_mode == "Or Newer":
             params["primary_release_date.gte"] = f"{year_number}-01-01"
-        elif year_mode == "Year and older":
+        elif year_mode == "Or Older":
             params["primary_release_date.lte"] = f"{year_number}-12-31"
 
     if language_value != "Any":
@@ -1043,7 +1048,7 @@ def main() -> None:
         ]
         st.write(f"Streaming Services: {', '.join(selected_provider_labels) if selected_provider_labels else 'Any'}")
         if current_filters["year"].strip():
-            st.write(f"Release Year: {current_filters['year'].strip()} {current_filters['year_mode']}")
+            st.write(f"Release Year: {current_filters['year_mode']} {current_filters['year'].strip()}")
         else:
             st.write("Release Year: Any")
         st.write(f"Language: {language_label(language_options, current_filters['language'])}")
