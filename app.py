@@ -1,14 +1,14 @@
 import os
-import sqlite3
 from collections import Counter
 
+import psycopg
 import requests
 import streamlit as st
+from psycopg.rows import dict_row
 
 
 BASE_URL = "https://api.themoviedb.org/3"
 POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
-DATABASE_PATH = "movies.db"
 
 
 def get_api_key() -> str | None:
@@ -16,6 +16,13 @@ def get_api_key() -> str | None:
 
 
 TMDB_API_KEY = get_api_key()
+
+
+def get_database_url() -> str | None:
+    return st.secrets.get("DATABASE_URL") or os.getenv("DATABASE_URL")
+
+
+DATABASE_URL = get_database_url()
 
 
 def tmdb_get(endpoint: str, params: dict | None = None) -> dict:
@@ -29,30 +36,28 @@ def tmdb_get(endpoint: str, params: dict | None = None) -> dict:
     return response.json()
 
 
-def get_db_connection() -> sqlite3.Connection:
-    return sqlite3.connect(DATABASE_PATH)
+def get_db_connection():
+    if not DATABASE_URL:
+        raise RuntimeError("Missing DATABASE_URL. Add it to Streamlit secrets or environment variables.")
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
 def init_db() -> None:
     with get_db_connection() as conn:
-        conn.execute(
+        with conn.cursor() as cur:
+            cur.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
                 username TEXT PRIMARY KEY,
                 pin TEXT NOT NULL
             )
             """
-        )
-        table_exists = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'saved_movies'"
-        ).fetchone()
-
-        if not table_exists:
-            conn.execute(
+            )
+            cur.execute(
                 """
-                CREATE TABLE saved_movies (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS saved_movies (
+                    id SERIAL PRIMARY KEY,
+                    username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
                     tmdb_id INTEGER NOT NULL,
                     title TEXT NOT NULL,
                     genres TEXT,
@@ -60,152 +65,77 @@ def init_db() -> None:
                     runtime INTEGER,
                     streaming_services TEXT,
                     language TEXT,
-                    user_rating REAL,
+                    user_rating NUMERIC(2,1),
                     notes TEXT,
                     UNIQUE(username, tmdb_id)
                 )
                 """
             )
-            conn.commit()
-            return
-
-        existing_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(saved_movies)").fetchall()
-        }
-        unique_index_sql = " ".join(
-            row[4] or ""
-            for row in conn.execute(
-                "SELECT * FROM sqlite_master WHERE type = 'index' AND tbl_name = 'saved_movies'"
-            ).fetchall()
-        )
-        needs_migration = "username" not in existing_columns or "username, tmdb_id" not in unique_index_sql
-
-        if needs_migration:
-            conn.execute("ALTER TABLE saved_movies RENAME TO saved_movies_old")
-            conn.execute(
-                """
-                CREATE TABLE saved_movies (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT NOT NULL,
-                    tmdb_id INTEGER NOT NULL,
-                    title TEXT NOT NULL,
-                    genres TEXT,
-                    release_date TEXT,
-                    runtime INTEGER,
-                    streaming_services TEXT,
-                    language TEXT,
-                    user_rating REAL,
-                    notes TEXT,
-                    UNIQUE(username, tmdb_id)
-                )
-                """
-            )
-            if "username" in existing_columns:
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO saved_movies (
-                        username, tmdb_id, title, genres, release_date, runtime,
-                        streaming_services, language, user_rating, notes
-                    )
-                    SELECT
-                        COALESCE(username, 'guest'),
-                        tmdb_id,
-                        title,
-                        genres,
-                        release_date,
-                        runtime,
-                        streaming_services,
-                        language,
-                        user_rating,
-                        notes
-                    FROM saved_movies_old
-                    """
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO saved_movies (
-                        username, tmdb_id, title, genres, release_date, runtime,
-                        streaming_services, language, user_rating, notes
-                    )
-                    SELECT
-                        'guest',
-                        tmdb_id,
-                        title,
-                        genres,
-                        release_date,
-                        runtime,
-                        streaming_services,
-                        language,
-                        user_rating,
-                        notes
-                    FROM saved_movies_old
-                    """
-                )
-            conn.execute("DROP TABLE saved_movies_old")
         conn.commit()
 
 
 def username_exists(username: str) -> bool:
     with get_db_connection() as conn:
-        row = conn.execute(
-            "SELECT username FROM users WHERE username = ?",
-            (username,),
-        ).fetchone()
+        with conn.cursor() as cur:
+            cur.execute("SELECT username FROM users WHERE username = %s", (username,))
+            row = cur.fetchone()
     return row is not None
 
 
 def create_user(username: str, pin: str) -> bool:
     try:
         with get_db_connection() as conn:
-            conn.execute(
-                "INSERT INTO users (username, pin) VALUES (?, ?)",
-                (username, pin),
-            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO users (username, pin) VALUES (%s, %s)",
+                    (username, pin),
+                )
             conn.commit()
         return True
-    except sqlite3.IntegrityError:
+    except psycopg.IntegrityError:
         return False
 
 
 def authenticate_user(username: str, pin: str) -> bool:
     with get_db_connection() as conn:
-        row = conn.execute(
-            "SELECT username FROM users WHERE username = ? AND pin = ?",
-            (username, pin),
-        ).fetchone()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT username FROM users WHERE username = %s AND pin = %s",
+                (username, pin),
+            )
+            row = cur.fetchone()
     return row is not None
 
 
 def fetch_saved_movies(username: str) -> list[dict]:
     with get_db_connection() as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT id, tmdb_id, title, genres, release_date, runtime,
-                   streaming_services, language, user_rating, notes
-            FROM saved_movies
-            WHERE username = ?
-            ORDER BY title COLLATE NOCASE
-            """,
-            (username,),
-        ).fetchall()
-    return [dict(row) for row in rows]
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, tmdb_id, title, genres, release_date, runtime,
+                       streaming_services, language, user_rating, notes
+                FROM saved_movies
+                WHERE username = %s
+                ORDER BY LOWER(title), title
+                """,
+                (username,),
+            )
+            return cur.fetchall()
 
 
 def fetch_saved_movie(username: str, tmdb_id: int) -> dict | None:
     with get_db_connection() as conn:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            """
-            SELECT id, tmdb_id, title, genres, release_date, runtime,
-                   streaming_services, language, user_rating, notes
-            FROM saved_movies
-            WHERE username = ? AND tmdb_id = ?
-            """,
-            (username, tmdb_id),
-        ).fetchone()
-    return dict(row) if row else None
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, tmdb_id, title, genres, release_date, runtime,
+                       streaming_services, language, user_rating, notes
+                FROM saved_movies
+                WHERE username = %s AND tmdb_id = %s
+                """,
+                (username, tmdb_id),
+            )
+            return cur.fetchone()
 
 
 def save_movie_record(
@@ -221,27 +151,28 @@ def save_movie_record(
     notes: str = "",
 ) -> None:
     with get_db_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO saved_movies (
-                username, tmdb_id, title, genres, release_date, runtime,
-                streaming_services, language, user_rating, notes
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO saved_movies (
+                    username, tmdb_id, title, genres, release_date, runtime,
+                    streaming_services, language, user_rating, notes
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    username,
+                    tmdb_id,
+                    title,
+                    ", ".join(genres),
+                    release_date,
+                    runtime,
+                    ", ".join(streaming_services),
+                    language,
+                    user_rating,
+                    notes.strip() or None,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                username,
-                tmdb_id,
-                title,
-                ", ".join(genres),
-                release_date,
-                runtime,
-                ", ".join(streaming_services),
-                language,
-                user_rating,
-                notes.strip() or None,
-            ),
-        )
         conn.commit()
 
 
@@ -309,23 +240,25 @@ def personalize_results(results: list[dict], filters: dict, profile: dict) -> li
 
 def update_saved_movie(username: str, tmdb_id: int, user_rating: float | None, notes: str) -> None:
     with get_db_connection() as conn:
-        conn.execute(
-            """
-            UPDATE saved_movies
-            SET user_rating = ?, notes = ?
-            WHERE username = ? AND tmdb_id = ?
-            """,
-            (user_rating, notes.strip() or None, username, tmdb_id),
-        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE saved_movies
+                SET user_rating = %s, notes = %s
+                WHERE username = %s AND tmdb_id = %s
+                """,
+                (user_rating, notes.strip() or None, username, tmdb_id),
+            )
         conn.commit()
 
 
 def delete_saved_movie(username: str, tmdb_id: int) -> None:
     with get_db_connection() as conn:
-        conn.execute(
-            "DELETE FROM saved_movies WHERE username = ? AND tmdb_id = ?",
-            (username, tmdb_id),
-        )
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM saved_movies WHERE username = %s AND tmdb_id = %s",
+                (username, tmdb_id),
+            )
         conn.commit()
 
 
@@ -682,6 +615,9 @@ def main() -> None:
 
     if not TMDB_API_KEY:
         st.error("TMDB_API_KEY is missing. Add it to Streamlit secrets before deploying.")
+        st.stop()
+    if not DATABASE_URL:
+        st.error("DATABASE_URL is missing. Add your Postgres connection string to Streamlit secrets before deploying.")
         st.stop()
 
     genre_map, genre_options = load_genres()
