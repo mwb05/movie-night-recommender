@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from collections import Counter
 
 import requests
 import streamlit as st
@@ -34,6 +35,14 @@ def get_db_connection() -> sqlite3.Connection:
 
 def init_db() -> None:
     with get_db_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                pin TEXT NOT NULL
+            )
+            """
+        )
         table_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'saved_movies'"
         ).fetchone()
@@ -137,6 +146,37 @@ def init_db() -> None:
         conn.commit()
 
 
+def username_exists(username: str) -> bool:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT username FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+    return row is not None
+
+
+def create_user(username: str, pin: str) -> bool:
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO users (username, pin) VALUES (?, ?)",
+                (username, pin),
+            )
+            conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def authenticate_user(username: str, pin: str) -> bool:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT username FROM users WHERE username = ? AND pin = ?",
+            (username, pin),
+        ).fetchone()
+    return row is not None
+
+
 def fetch_saved_movies(username: str) -> list[dict]:
     with get_db_connection() as conn:
         conn.row_factory = sqlite3.Row
@@ -177,15 +217,17 @@ def save_movie_record(
     runtime: int | None,
     streaming_services: list[str],
     language: str,
+    user_rating: float | None = None,
+    notes: str = "",
 ) -> None:
     with get_db_connection() as conn:
         conn.execute(
             """
             INSERT INTO saved_movies (
                 username, tmdb_id, title, genres, release_date, runtime,
-                streaming_services, language
+                streaming_services, language, user_rating, notes
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 username,
@@ -196,9 +238,73 @@ def save_movie_record(
                 runtime,
                 ", ".join(streaming_services),
                 language,
+                user_rating,
+                notes.strip() or None,
             ),
         )
         conn.commit()
+
+
+def build_user_preference_profile(username: str, genre_map: dict[str, str]) -> dict:
+    saved_movies = fetch_saved_movies(username)
+    rated_movies = [movie for movie in saved_movies if movie.get("user_rating") is not None]
+    favorite_movies = [movie for movie in rated_movies if movie["user_rating"] >= 7]
+    source_movies = favorite_movies or rated_movies
+
+    if not source_movies:
+        return {
+            "favorite_count": 0,
+            "top_genres": [],
+            "preferred_genre_ids": set(),
+            "top_languages": [],
+            "top_streaming_services": [],
+        }
+
+    genre_counts: Counter[str] = Counter()
+    language_counts: Counter[str] = Counter()
+    provider_counts: Counter[str] = Counter()
+
+    for movie in source_movies:
+        for genre_name in [item.strip() for item in (movie.get("genres") or "").split(",") if item.strip()]:
+            genre_counts[genre_name] += 1
+        language_value = (movie.get("language") or "").strip().lower()
+        if language_value:
+            language_counts[language_value] += 1
+        for provider_name in [item.strip() for item in (movie.get("streaming_services") or "").split(",") if item.strip()]:
+            provider_counts[provider_name] += 1
+
+    top_genres = [genre for genre, _ in genre_counts.most_common(3)]
+    preferred_genre_ids = {
+        int(genre_map[genre].split(",")[0])
+        for genre in top_genres
+        if genre in genre_map and genre_map[genre].split(",")[0].isdigit()
+    }
+
+    return {
+        "favorite_count": len(source_movies),
+        "top_genres": top_genres,
+        "preferred_genre_ids": preferred_genre_ids,
+        "top_languages": [language for language, _ in language_counts.most_common(2)],
+        "top_streaming_services": [provider for provider, _ in provider_counts.most_common(2)],
+    }
+
+
+def personalize_results(results: list[dict], filters: dict, profile: dict) -> list[dict]:
+    if not results or not profile["favorite_count"]:
+        return results
+
+    def score(movie: dict) -> tuple[int, float]:
+        points = 0
+        genre_ids = set(movie.get("genre_ids", []))
+        if profile["preferred_genre_ids"] and genre_ids & profile["preferred_genre_ids"]:
+            points += 3
+        if profile["top_languages"]:
+            movie_language = (movie.get("original_language") or "").strip().lower()
+            if movie_language in profile["top_languages"]:
+                points += 2
+        return (points, movie.get("vote_average", 0.0))
+
+    return sorted(results, key=score, reverse=True)
 
 
 def update_saved_movie(username: str, tmdb_id: int, user_rating: float | None, notes: str) -> None:
@@ -304,6 +410,24 @@ def find_actor_id(actor_name: str) -> int | None:
     return results[0]["id"]
 
 
+@st.cache_data(show_spinner=False)
+def search_movie_by_title(title: str) -> list[dict]:
+    title = title.strip()
+    if not title:
+        return []
+
+    data = tmdb_get(
+        "/search/movie",
+        {
+            "query": title,
+            "include_adult": False,
+            "language": "en-US",
+        },
+    )
+    results = data.get("results", [])
+    return results[:10]
+
+
 def build_discover_params(
     genre_value: str,
     extra_genres: list[str],
@@ -371,7 +495,12 @@ def build_discover_params(
     return params
 
 
-def fetch_recommendation_page(filters: dict, genre_map: dict[str, str], page_number: int) -> tuple[list[dict], int]:
+def fetch_recommendation_page(
+    filters: dict,
+    genre_map: dict[str, str],
+    page_number: int,
+    profile: dict | None = None,
+) -> tuple[list[dict], int]:
     data = tmdb_get(
         "/discover/movie",
         build_discover_params(
@@ -387,7 +516,10 @@ def fetch_recommendation_page(filters: dict, genre_map: dict[str, str], page_num
             page_number,
         ),
     )
-    results = data.get("results", [])[:5]
+    results = data.get("results", [])
+    if profile:
+        results = personalize_results(results, filters, profile)
+    results = results[:5]
     total_available_pages = min(data.get("total_pages", 1), 500)
     return results, total_available_pages
 
@@ -400,20 +532,21 @@ def reset_state_for_new_search() -> None:
     st.session_state.current_page = 0
     st.session_state.total_pages = 1
     st.session_state.recommendations = []
+    st.session_state.title_search_results = []
     st.session_state.selected_movie_id = None
     st.session_state.search_message = ""
     st.session_state.search_error = ""
 
 
-def load_page(filters: dict, genre_map: dict[str, str], page_number: int) -> None:
+def load_page(filters: dict, genre_map: dict[str, str], page_number: int, profile: dict | None = None) -> None:
     try:
-        results, total_pages = fetch_recommendation_page(filters, genre_map, page_number)
+        results, total_pages = fetch_recommendation_page(filters, genre_map, page_number, profile)
         wrapped = False
         target_page = page_number
 
         if not results and page_number != 1:
             target_page = 1
-            results, total_pages = fetch_recommendation_page(filters, genre_map, 1)
+            results, total_pages = fetch_recommendation_page(filters, genre_map, 1, profile)
             wrapped = True
 
         st.session_state.total_pages = total_pages
@@ -451,12 +584,15 @@ def ensure_state() -> None:
         "current_page": 0,
         "total_pages": 1,
         "recommendations": [],
+        "title_search_results": [],
         "selected_movie_id": None,
         "search_message": "",
         "search_error": "",
         "filters": None,
         "extra_genres_list": [],
         "username": "",
+        "pin": "",
+        "authenticated_user": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -550,12 +686,106 @@ def main() -> None:
     certification_options = load_us_certifications()
     provider_map = load_watch_providers()
     provider_options = list(provider_map.keys())
-    username = st.text_input(
-        "Username",
-        value=st.session_state.username,
-        placeholder="Enter a username to save your movies",
-    ).strip()
-    st.session_state.username = username
+    st.markdown("### User Login")
+    auth_name_col, auth_pin_col = st.columns(2)
+    with auth_name_col:
+        entered_username = st.text_input(
+            "Username",
+            value=st.session_state.username,
+            placeholder="Choose or enter a username",
+        ).strip()
+    with auth_pin_col:
+        entered_pin = st.text_input(
+            "PIN",
+            value=st.session_state.pin,
+            placeholder="4 digits or any short PIN",
+            type="password",
+        ).strip()
+    st.session_state.username = entered_username
+    st.session_state.pin = entered_pin
+
+    login_col, create_col, logout_col = st.columns(3)
+    with login_col:
+        login_clicked = st.button("Log In", use_container_width=True)
+    with create_col:
+        create_clicked = st.button("Create User", use_container_width=True)
+    with logout_col:
+        logout_clicked = st.button("Log Out", use_container_width=True, disabled=not st.session_state.authenticated_user)
+
+    if create_clicked:
+        if not entered_username or not entered_pin:
+            st.error("Enter both a username and PIN to create an account.")
+        elif username_exists(entered_username):
+            st.error("That username is already taken. Try logging in or choose another one.")
+        elif create_user(entered_username, entered_pin):
+            st.session_state.authenticated_user = entered_username
+            st.success(f"Account created. You are logged in as {entered_username}.")
+        else:
+            st.error("Could not create that username.")
+
+    if login_clicked:
+        if not entered_username or not entered_pin:
+            st.error("Enter both a username and PIN to log in.")
+        elif authenticate_user(entered_username, entered_pin):
+            st.session_state.authenticated_user = entered_username
+            st.success(f"Logged in as {entered_username}.")
+        else:
+            st.error("Username or PIN did not match.")
+
+    if logout_clicked:
+        st.session_state.authenticated_user = ""
+        st.session_state.selected_movie_id = None
+        st.session_state.title_search_results = []
+        st.session_state.recommendations = []
+        st.session_state.search_message = ""
+        st.success("You have been logged out.")
+
+    active_user = st.session_state.authenticated_user
+    if active_user:
+        st.caption(f"Signed in as: {active_user}")
+    else:
+        st.info("Create a username and PIN, or log in to save movies and keep your preferences private.")
+
+    user_profile = build_user_preference_profile(active_user, genre_map) if active_user else None
+
+    if active_user:
+        st.markdown("### Your Taste Profile")
+        if user_profile and user_profile["favorite_count"]:
+            liked_genres = ", ".join(user_profile["top_genres"]) if user_profile["top_genres"] else "Still learning"
+            liked_languages = ", ".join(language.upper() for language in user_profile["top_languages"]) if user_profile["top_languages"] else "Still learning"
+            liked_services = ", ".join(user_profile["top_streaming_services"]) if user_profile["top_streaming_services"] else "Still learning"
+            st.write(f"Based on {user_profile['favorite_count']} rated saved movie(s), you seem to like: **{liked_genres}**.")
+            st.write(f"Preferred languages: {liked_languages}")
+            st.write(f"Common streaming picks: {liked_services}")
+            st.caption("Recommendation batches are filtered by your search choices first, then sorted using your saved ratings and preferences.")
+        else:
+            st.info("Rate a few saved movies and the app will start tailoring recommendation order to your taste.")
+
+    st.markdown("### Search by Title")
+    title_search_col, title_button_col = st.columns([4, 1.3], vertical_alignment="bottom")
+    with title_search_col:
+        title_search = st.text_input("Movie Title", placeholder="Search for a movie by title")
+    with title_button_col:
+        title_submitted = st.button("Find Movie", use_container_width=True)
+
+    if title_submitted:
+        try:
+            matches = search_movie_by_title(title_search)
+            st.session_state.recommendations = []
+            if not matches:
+                st.session_state.title_search_results = []
+                st.session_state.search_error = ""
+                st.session_state.search_message = f"No movie found for '{title_search.strip()}'."
+                st.session_state.selected_movie_id = None
+            else:
+                st.session_state.title_search_results = matches
+                st.session_state.selected_movie_id = None
+                st.session_state.search_error = ""
+                st.session_state.search_message = f"Found {len(matches)} title matches."
+        except Exception as error:
+            st.session_state.search_error = str(error)
+            st.session_state.title_search_results = []
+            st.session_state.selected_movie_id = None
 
     st.markdown('<div class="filters-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-label">Filters</div>', unsafe_allow_html=True)
@@ -633,14 +863,14 @@ def main() -> None:
     if submitted:
         reset_state_for_new_search()
         st.session_state.filters = filters
-        load_page(filters, genre_map, 1)
+        load_page(filters, genre_map, 1, user_profile)
 
     current_filters = st.session_state.filters
     if current_filters and st.button("Get 5 Different", disabled=not st.session_state.recommendations, use_container_width=True):
         next_page = st.session_state.current_page + 1
         if next_page > max(st.session_state.total_pages, 1):
             next_page = 1
-        load_page(current_filters, genre_map, next_page)
+        load_page(current_filters, genre_map, next_page, user_profile)
 
     if st.session_state.search_error:
         st.error(st.session_state.search_error)
@@ -648,6 +878,20 @@ def main() -> None:
         st.info(st.session_state.search_message)
 
     recommendations = st.session_state.recommendations
+    title_search_results = st.session_state.title_search_results
+    if title_search_results and st.session_state.selected_movie_id is None:
+        st.markdown('<div class="results-card">', unsafe_allow_html=True)
+        st.markdown("### Title Matches")
+        for index, movie in enumerate(title_search_results, start=1):
+            year_value = movie.get("release_date", "")[:4] if movie.get("release_date") else "N/A"
+            overview = movie.get("overview") or "No description available."
+            st.markdown(f"**{index}. {movie['title']} ({year_value})**")
+            st.caption(overview[:180] + ("..." if len(overview) > 180 else ""))
+            if st.button("Open Details", key=f"title_match_{movie['id']}", use_container_width=True):
+                st.session_state.selected_movie_id = movie["id"]
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
     if recommendations and st.session_state.selected_movie_id is None:
         st.markdown('<div class="results-card">', unsafe_allow_html=True)
         st.markdown("### Recommendations")
@@ -675,7 +919,7 @@ def main() -> None:
             provider_names = [provider["provider_name"] for provider in flatrate_providers]
             buy_provider_names = [provider["provider_name"] for provider in buy_providers]
             rent_provider_names = [provider["provider_name"] for provider in rent_providers]
-            active_username = st.session_state.username
+            active_username = st.session_state.authenticated_user
             saved_movie = fetch_saved_movie(active_username, movie_id) if active_username else None
 
             st.markdown("### Movie Details")
@@ -699,7 +943,22 @@ def main() -> None:
             if not active_username:
                 st.info("Enter a username above to save and manage movies in your personal database.")
             elif saved_movie is None:
+                initial_rating = st.number_input(
+                    "Your Rating",
+                    min_value=0.0,
+                    max_value=10.0,
+                    value=0.0,
+                    step=0.5,
+                    key=f"new_rating_{movie_id}",
+                )
+                initial_notes = st.text_area(
+                    "Notes",
+                    value="",
+                    placeholder="What did you like about this movie?",
+                    key=f"new_notes_{movie_id}",
+                )
                 if st.button("Save to Database", use_container_width=True):
+                    normalized_rating = initial_rating if initial_rating > 0 else None
                     save_movie_record(
                         username=active_username,
                         tmdb_id=movie_id,
@@ -709,6 +968,8 @@ def main() -> None:
                         runtime=details.get("runtime"),
                         streaming_services=provider_names,
                         language=details.get("original_language", "").upper() or "N/A",
+                        user_rating=normalized_rating,
+                        notes=initial_notes,
                     )
                     st.success(f"{details['title']} was added to your saved movies database.")
                     st.rerun()
@@ -735,7 +996,7 @@ def main() -> None:
                     if st.button("Update Saved Movie", use_container_width=True):
                         normalized_rating = rating_value if rating_value > 0 else None
                         update_saved_movie(active_username, movie_id, normalized_rating, notes_value)
-                        st.success("Saved movie updated.")
+                        st.success("Saved movie updated. Future recommendations will use your latest rating.")
                         st.rerun()
                 with delete_col:
                     if st.button("Delete Saved Movie", use_container_width=True):
@@ -750,8 +1011,8 @@ def main() -> None:
             st.rerun()
 
     st.markdown("### Saved Movies Database")
-    if username:
-        saved_movies = fetch_saved_movies(username)
+    if active_user:
+        saved_movies = fetch_saved_movies(active_user)
         if saved_movies:
             for movie in saved_movies:
                 st.markdown(
@@ -767,7 +1028,7 @@ def main() -> None:
         else:
             st.info("No saved movies yet for this username. Open a recommendation and click 'Save to Database' to create your first record.")
     else:
-        st.info("Enter a username to view and manage your saved movies.")
+        st.info("Log in to view and manage your saved movies.")
 
     if current_filters:
         st.markdown("### Selected Filters")
