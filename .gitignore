@@ -2,3 +2,29 @@
 __pycache__/
 .env
 .venv/
+.duckdb-venv/
+*.jsonl
+
+# Movie recommender local artifacts
+movie_recommender/__pycache__/
+movie_recommender/*.ipynb
+
+# Unrelated local/project files currently kept out of this repo
+.env.example
+EVENT_DAY_STRATEGY_README.md
+INTRADAY_EVENT_BOT_README.md
+PYTHONANYWHERE.md
+alpaca_paper_client.py
+api_powered_ipywidgets_form.ipynb
+bot_config.json
+convert_finance_csvs_to_parquet.py
+event_day_requirements.txt
+event_day_strategy.py
+intraday_event_requirements.txt
+intraday_event_strategy.py
+pythonanywhere_fixes/
+run_close.sh
+run_execute.sh
+run_reconcile.sh
+run_scan.sh
+top_gainers_clean.py
