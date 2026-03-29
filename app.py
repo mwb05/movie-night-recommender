@@ -53,38 +53,99 @@ def init_db() -> None:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                username TEXT PRIMARY KEY,
-                pin TEXT NOT NULL
-            )
-            """
-            )
-            cur.execute(
                 """
-                CREATE TABLE IF NOT EXISTS saved_movies (
+                CREATE TABLE IF NOT EXISTS app_users (
                     id SERIAL PRIMARY KEY,
-                    username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
-                    tmdb_id INTEGER NOT NULL,
-                    title TEXT NOT NULL,
-                    genres TEXT,
-                    release_date TEXT,
-                    runtime INTEGER,
-                    streaming_services TEXT,
-                    language TEXT,
-                    user_rating NUMERIC(2,1),
-                    notes TEXT,
-                    UNIQUE(username, tmdb_id)
+                    username TEXT NOT NULL UNIQUE,
+                    pin TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS movies (
+                    id SERIAL PRIMARY KEY,
+                    tmdb_id INTEGER NOT NULL UNIQUE,
+                    title TEXT NOT NULL,
+                    release_date TEXT,
+                    runtime INTEGER,
+                    genres TEXT,
+                    streaming_services TEXT,
+                    language TEXT
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_movies (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+                    movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
+                    user_rating NUMERIC(2,1),
+                    notes TEXT,
+                    saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(user_id, movie_id)
+                )
+                """
+            )
+
+            # Migrate older username-based users into the normalized app_users table.
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'users'
+                )
+                """
+            )
+            if cur.fetchone()["exists"]:
+                cur.execute(
+                    """
+                    INSERT INTO app_users (username, pin)
+                    SELECT username, pin
+                    FROM users
+                    ON CONFLICT (username) DO NOTHING
+                    """
+                )
+
+            # Migrate denormalized saved_movies rows into movies + user_movies once.
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'saved_movies'
+                )
+                """
+            )
+            if cur.fetchone()["exists"]:
+                cur.execute(
+                    """
+                    INSERT INTO movies (tmdb_id, title, release_date, runtime, genres, streaming_services, language)
+                    SELECT DISTINCT tmdb_id, title, release_date, runtime, genres, streaming_services, language
+                    FROM saved_movies
+                    ON CONFLICT (tmdb_id) DO NOTHING
+                    """
+                )
+                cur.execute(
+                    """
+                    INSERT INTO user_movies (user_id, movie_id, user_rating, notes)
+                    SELECT DISTINCT au.id, m.id, sm.user_rating, sm.notes
+                    FROM saved_movies sm
+                    JOIN app_users au ON au.username = sm.username
+                    JOIN movies m ON m.tmdb_id = sm.tmdb_id
+                    ON CONFLICT (user_id, movie_id) DO NOTHING
+                    """
+                )
         conn.commit()
 
 
 def username_exists(username: str) -> bool:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT username FROM users WHERE username = %s", (username,))
+            cur.execute("SELECT username FROM app_users WHERE username = %s", (username,))
             row = cur.fetchone()
     return row is not None
 
@@ -94,7 +155,7 @@ def create_user(username: str, pin: str) -> bool:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO users (username, pin) VALUES (%s, %s)",
+                    "INSERT INTO app_users (username, pin) VALUES (%s, %s)",
                     (username, pin),
                 )
             conn.commit()
@@ -107,7 +168,7 @@ def authenticate_user(username: str, pin: str) -> bool:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT username FROM users WHERE username = %s AND pin = %s",
+                "SELECT username FROM app_users WHERE username = %s AND pin = %s",
                 (username, pin),
             )
             row = cur.fetchone()
@@ -119,10 +180,21 @@ def fetch_saved_movies(username: str) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, tmdb_id, title, genres, release_date, runtime,
-                       streaming_services, language, user_rating, notes
-                FROM saved_movies
-                WHERE username = %s
+                SELECT
+                    um.id,
+                    m.tmdb_id,
+                    m.title,
+                    m.genres,
+                    m.release_date,
+                    m.runtime,
+                    m.streaming_services,
+                    m.language,
+                    um.user_rating,
+                    um.notes
+                FROM user_movies um
+                JOIN app_users au ON au.id = um.user_id
+                JOIN movies m ON m.id = um.movie_id
+                WHERE au.username = %s
                 ORDER BY LOWER(title), title
                 """,
                 (username,),
@@ -135,14 +207,72 @@ def fetch_saved_movie(username: str, tmdb_id: int) -> dict | None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, tmdb_id, title, genres, release_date, runtime,
-                       streaming_services, language, user_rating, notes
-                FROM saved_movies
-                WHERE username = %s AND tmdb_id = %s
+                SELECT
+                    um.id,
+                    m.tmdb_id,
+                    m.title,
+                    m.genres,
+                    m.release_date,
+                    m.runtime,
+                    m.streaming_services,
+                    m.language,
+                    um.user_rating,
+                    um.notes
+                FROM user_movies um
+                JOIN app_users au ON au.id = um.user_id
+                JOIN movies m ON m.id = um.movie_id
+                WHERE au.username = %s AND m.tmdb_id = %s
                 """,
                 (username, tmdb_id),
             )
             return cur.fetchone()
+
+
+def fetch_all_users() -> list[dict]:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, username, created_at
+                FROM app_users
+                ORDER BY id
+                """
+            )
+            return cur.fetchall()
+
+
+def fetch_all_movies() -> list[dict]:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, tmdb_id, title, release_date, runtime, genres, language
+                FROM movies
+                ORDER BY id
+                """
+            )
+            return cur.fetchall()
+
+
+def fetch_user_movie_links() -> list[dict]:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    um.id,
+                    au.username,
+                    m.title,
+                    um.user_rating,
+                    um.notes,
+                    um.saved_at
+                FROM user_movies um
+                JOIN app_users au ON au.id = um.user_id
+                JOIN movies m ON m.id = um.movie_id
+                ORDER BY um.id
+                """
+            )
+            return cur.fetchall()
 
 
 def save_movie_record(
@@ -161,24 +291,42 @@ def save_movie_record(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO saved_movies (
-                    username, tmdb_id, title, genres, release_date, runtime,
-                    streaming_services, language, user_rating, notes
+                INSERT INTO movies (
+                    tmdb_id, title, release_date, runtime, genres, streaming_services, language
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (tmdb_id) DO UPDATE
+                SET
+                    title = EXCLUDED.title,
+                    release_date = EXCLUDED.release_date,
+                    runtime = EXCLUDED.runtime,
+                    genres = EXCLUDED.genres,
+                    streaming_services = EXCLUDED.streaming_services,
+                    language = EXCLUDED.language
+                RETURNING id
                 """,
                 (
-                    username,
                     tmdb_id,
                     title,
-                    ", ".join(genres),
                     release_date,
                     runtime,
+                    ", ".join(genres),
                     ", ".join(streaming_services),
                     language,
-                    user_rating,
-                    notes.strip() or None,
                 ),
+            )
+            movie_id = cur.fetchone()["id"]
+            cur.execute(
+                """
+                INSERT INTO user_movies (user_id, movie_id, user_rating, notes)
+                SELECT id, %s, %s, %s
+                FROM app_users
+                WHERE username = %s
+                ON CONFLICT (user_id, movie_id) DO UPDATE
+                SET user_rating = EXCLUDED.user_rating,
+                    notes = EXCLUDED.notes
+                """,
+                (movie_id, user_rating, notes.strip() or None, username),
             )
         conn.commit()
 
@@ -250,9 +398,14 @@ def update_saved_movie(username: str, tmdb_id: int, user_rating: float | None, n
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE saved_movies
+                UPDATE user_movies um
                 SET user_rating = %s, notes = %s
-                WHERE username = %s AND tmdb_id = %s
+                WHERE um.user_id = (
+                    SELECT id FROM app_users WHERE username = %s
+                )
+                AND um.movie_id = (
+                    SELECT id FROM movies WHERE tmdb_id = %s
+                )
                 """,
                 (user_rating, notes.strip() or None, username, tmdb_id),
             )
@@ -263,7 +416,14 @@ def delete_saved_movie(username: str, tmdb_id: int) -> None:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM saved_movies WHERE username = %s AND tmdb_id = %s",
+                """
+                DELETE FROM user_movies um
+                USING app_users au, movies m
+                WHERE um.user_id = au.id
+                  AND um.movie_id = m.id
+                  AND au.username = %s
+                  AND m.tmdb_id = %s
+                """,
                 (username, tmdb_id),
             )
         conn.commit()
@@ -977,6 +1137,14 @@ def main() -> None:
             st.info("No saved movies yet for this username. Open a recommendation and click 'Save to Database' to create your first record.")
     else:
         st.info("Log in to view and manage your saved movies.")
+
+    with st.expander("View Database Tables"):
+        st.write("Users Table")
+        st.dataframe(fetch_all_users(), use_container_width=True)
+        st.write("Movies Table")
+        st.dataframe(fetch_all_movies(), use_container_width=True)
+        st.write("User-Movies Junction Table")
+        st.dataframe(fetch_user_movie_links(), use_container_width=True)
 
     if current_filters:
         st.markdown("### Selected Filters")
