@@ -762,6 +762,7 @@ def ensure_state() -> None:
         "username": "",
         "pin": "",
         "authenticated_user": "",
+        "current_view": "Recommendations",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -858,81 +859,81 @@ def main() -> None:
     certification_options = load_us_certifications()
     provider_map = load_watch_providers()
     provider_options = list(provider_map.keys())
-    st.markdown("### User Login")
-    auth_name_col, auth_pin_col = st.columns(2)
-    with auth_name_col:
+    with st.sidebar:
+        st.markdown("## Menu")
+        for label in ["Recommendations", "Movie Search", "My Movies"]:
+            if st.button(label, use_container_width=True, key=f"nav_{label}"):
+                st.session_state.current_view = label
+
+        st.divider()
+        st.markdown("## Account")
         entered_username = st.text_input(
             "Username",
             value=st.session_state.username,
             placeholder="Choose or enter a username",
         ).strip()
-    with auth_pin_col:
         entered_pin = st.text_input(
             "PIN",
             value=st.session_state.pin,
             placeholder="4 digits or any short PIN",
             type="password",
         ).strip()
-    st.session_state.username = entered_username
-    st.session_state.pin = entered_pin
+        st.session_state.username = entered_username
+        st.session_state.pin = entered_pin
 
-    login_col, create_col, logout_col = st.columns(3)
-    with login_col:
         login_clicked = st.button("Log In", use_container_width=True)
-    with create_col:
-        create_clicked = st.button("Create User", use_container_width=True)
-    with logout_col:
-        logout_clicked = st.button("Log Out", use_container_width=True, disabled=not st.session_state.authenticated_user)
+        create_clicked = st.button("Sign Up", use_container_width=True)
+        logout_clicked = st.button(
+            "Log Out",
+            use_container_width=True,
+            disabled=not st.session_state.authenticated_user,
+        )
 
-    if create_clicked:
-        if not entered_username or not entered_pin:
-            st.error("Enter both a username and PIN to create an account.")
-        elif username_exists(entered_username):
-            st.error("That username is already taken. Try logging in or choose another one.")
-        elif create_user(entered_username, entered_pin):
-            st.session_state.authenticated_user = entered_username
-            st.success(f"Account created. You are logged in as {entered_username}.")
+        if create_clicked:
+            if not entered_username or not entered_pin:
+                st.error("Enter both a username and PIN to create an account.")
+            elif username_exists(entered_username):
+                st.error("That username is already taken. Try logging in or choose another one.")
+            elif create_user(entered_username, entered_pin):
+                st.session_state.authenticated_user = entered_username
+                st.success(f"Logged in as {entered_username}.")
+            else:
+                st.error("Could not create that username.")
+
+        if login_clicked:
+            if not entered_username or not entered_pin:
+                st.error("Enter both a username and PIN to log in.")
+            elif authenticate_user(entered_username, entered_pin):
+                st.session_state.authenticated_user = entered_username
+                st.success(f"Logged in as {entered_username}.")
+            else:
+                st.error("Username or PIN did not match.")
+
+        if logout_clicked:
+            st.session_state.authenticated_user = ""
+            st.session_state.selected_movie_id = None
+            st.session_state.title_search_results = []
+            st.session_state.recommendations = []
+            st.session_state.search_message = ""
+            st.success("You have been logged out.")
+
+        active_user = st.session_state.authenticated_user
+        if active_user:
+            st.caption(f"Signed in as: {active_user}")
         else:
-            st.error("Could not create that username.")
-
-    if login_clicked:
-        if not entered_username or not entered_pin:
-            st.error("Enter both a username and PIN to log in.")
-        elif authenticate_user(entered_username, entered_pin):
-            st.session_state.authenticated_user = entered_username
-            st.success(f"Logged in as {entered_username}.")
-        else:
-            st.error("Username or PIN did not match.")
-
-    if logout_clicked:
-        st.session_state.authenticated_user = ""
-        st.session_state.selected_movie_id = None
-        st.session_state.title_search_results = []
-        st.session_state.recommendations = []
-        st.session_state.search_message = ""
-        st.success("You have been logged out.")
-
-    active_user = st.session_state.authenticated_user
-    if active_user:
-        st.caption(f"Signed in as: {active_user}")
-    else:
-        st.info("Create a username and PIN, or log in to save movies and keep your preferences private.")
+            st.caption("Log in to save movies and build personal recommendations.")
 
     user_profile = build_user_preference_profile(active_user, genre_map) if active_user else None
-    page = st.sidebar.radio("Navigate", ["Recommendations", "Movie Search", "My Movies"])
+    page = st.session_state.current_view
 
-    if active_user:
-        st.markdown("### Your Taste Profile")
-        if user_profile and user_profile["favorite_count"]:
+    if active_user and user_profile and user_profile["favorite_count"]:
+        with st.sidebar:
+            st.divider()
+            st.markdown("## Your Taste")
             liked_genres = ", ".join(user_profile["top_genres"]) if user_profile["top_genres"] else "Still learning"
             liked_languages = ", ".join(language.upper() for language in user_profile["top_languages"]) if user_profile["top_languages"] else "Still learning"
-            liked_services = ", ".join(user_profile["top_streaming_services"]) if user_profile["top_streaming_services"] else "Still learning"
-            st.write(f"Based on {user_profile['favorite_count']} rated saved movie(s), you seem to like: **{liked_genres}**.")
-            st.write(f"Preferred languages: {liked_languages}")
-            st.write(f"Common streaming picks: {liked_services}")
-            st.caption("With no genre or language filters, the app now uses your saved taste to shape the recommendation query itself, then sorts the results using your ratings and preferences.")
-        else:
-            st.info("Rate a few saved movies and the app will start tailoring recommendation order to your taste.")
+            st.caption(f"Likes: {liked_genres}")
+            st.caption(f"Languages: {liked_languages}")
 
     if st.session_state.search_error:
         st.error(st.session_state.search_error)
