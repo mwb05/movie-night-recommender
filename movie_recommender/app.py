@@ -72,8 +72,15 @@ def init_db() -> None:
                     runtime INTEGER,
                     genres TEXT,
                     streaming_services TEXT,
-                    language TEXT
+                    language TEXT,
+                    poster_path TEXT
                 )
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE movies
+                ADD COLUMN IF NOT EXISTS poster_path TEXT
                 """
             )
             cur.execute(
@@ -82,6 +89,7 @@ def init_db() -> None:
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
                     movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
+                    watch_status TEXT NOT NULL DEFAULT 'watched',
                     preference TEXT NOT NULL DEFAULT 'liked',
                     user_rating NUMERIC(2,1),
                     notes TEXT,
@@ -94,6 +102,12 @@ def init_db() -> None:
                 """
                 ALTER TABLE user_movies
                 ADD COLUMN IF NOT EXISTS preference TEXT NOT NULL DEFAULT 'liked'
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE user_movies
+                ADD COLUMN IF NOT EXISTS watch_status TEXT NOT NULL DEFAULT 'watched'
                 """
             )
 
@@ -208,6 +222,8 @@ def fetch_saved_movies(username: str) -> list[dict]:
                     m.runtime,
                     m.streaming_services,
                     m.language,
+                    m.poster_path,
+                    um.watch_status,
                     um.preference,
                     um.user_rating,
                     um.notes
@@ -236,6 +252,8 @@ def fetch_saved_movie(username: str, tmdb_id: int) -> dict | None:
                     m.runtime,
                     m.streaming_services,
                     m.language,
+                    m.poster_path,
+                    um.watch_status,
                     um.preference,
                     um.user_rating,
                     um.notes
@@ -305,6 +323,8 @@ def save_movie_record(
     runtime: int | None,
     streaming_services: list[str],
     language: str,
+    poster_path: str | None = None,
+    watch_status: str = "watched",
     preference: str = "liked",
     user_rating: float | None = None,
     notes: str = "",
@@ -314,9 +334,9 @@ def save_movie_record(
             cur.execute(
                 """
                 INSERT INTO movies (
-                    tmdb_id, title, release_date, runtime, genres, streaming_services, language
+                    tmdb_id, title, release_date, runtime, genres, streaming_services, language, poster_path
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (tmdb_id) DO UPDATE
                 SET
                     title = EXCLUDED.title,
@@ -324,7 +344,8 @@ def save_movie_record(
                     runtime = EXCLUDED.runtime,
                     genres = EXCLUDED.genres,
                     streaming_services = EXCLUDED.streaming_services,
-                    language = EXCLUDED.language
+                    language = EXCLUDED.language,
+                    poster_path = EXCLUDED.poster_path
                 RETURNING id
                 """,
                 (
@@ -335,21 +356,23 @@ def save_movie_record(
                     ", ".join(genres),
                     ", ".join(streaming_services),
                     language,
+                    poster_path,
                 ),
             )
             movie_id = cur.fetchone()["id"]
             cur.execute(
                 """
-                INSERT INTO user_movies (user_id, movie_id, preference, user_rating, notes)
-                SELECT id, %s, %s, %s, %s
+                INSERT INTO user_movies (user_id, movie_id, watch_status, preference, user_rating, notes)
+                SELECT id, %s, %s, %s, %s, %s
                 FROM app_users
                 WHERE username = %s
                 ON CONFLICT (user_id, movie_id) DO UPDATE
-                SET preference = EXCLUDED.preference,
+                SET watch_status = EXCLUDED.watch_status,
+                    preference = EXCLUDED.preference,
                     user_rating = EXCLUDED.user_rating,
                     notes = EXCLUDED.notes
                 """,
-                (movie_id, preference, user_rating, notes.strip() or None, username),
+                (movie_id, watch_status, preference, user_rating, notes.strip() or None, username),
             )
         conn.commit()
 
@@ -358,7 +381,11 @@ def build_user_preference_profile(username: str, genre_map: dict[str, str]) -> d
     saved_movies = fetch_saved_movies(username)
     saved_tmdb_ids = {movie["tmdb_id"] for movie in saved_movies}
     disliked_movies = [movie for movie in saved_movies if movie.get("preference") == "disliked"]
-    liked_movies = [movie for movie in saved_movies if movie.get("preference") != "disliked"]
+    liked_movies = [
+        movie
+        for movie in saved_movies
+        if movie.get("preference") != "disliked" and movie.get("watch_status") != "want_to_watch"
+    ]
     rated_movies = [movie for movie in liked_movies if movie.get("user_rating") is not None]
     favorite_movies = [movie for movie in rated_movies if movie["user_rating"] >= 4]
     source_movies = favorite_movies or rated_movies
@@ -465,13 +492,20 @@ def personalize_results(results: list[dict], filters: dict, profile: dict) -> li
     return sorted(filtered_results, key=score, reverse=True)
 
 
-def update_saved_movie(username: str, tmdb_id: int, preference: str, user_rating: float | None, notes: str) -> None:
+def update_saved_movie(
+    username: str,
+    tmdb_id: int,
+    watch_status: str,
+    preference: str,
+    user_rating: float | None,
+    notes: str,
+) -> None:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 UPDATE user_movies um
-                SET preference = %s, user_rating = %s, notes = %s
+                SET watch_status = %s, preference = %s, user_rating = %s, notes = %s
                 WHERE um.user_id = (
                     SELECT id FROM app_users WHERE username = %s
                 )
@@ -479,7 +513,7 @@ def update_saved_movie(username: str, tmdb_id: int, preference: str, user_rating
                     SELECT id FROM movies WHERE tmdb_id = %s
                 )
                 """,
-                (preference, user_rating, notes.strip() or None, username, tmdb_id),
+                (watch_status, preference, user_rating, notes.strip() or None, username, tmdb_id),
             )
         conn.commit()
 
@@ -499,10 +533,19 @@ def save_not_interested_movie(
         runtime=None,
         streaming_services=streaming_services,
         language=(movie.get("original_language") or "").upper() or "N/A",
+        poster_path=movie.get("poster_path"),
+        watch_status="watched",
         preference="disliked",
         user_rating=None,
         notes="Marked as not interested from recommendations.",
     )
+
+
+WATCH_STATUS_OPTIONS = {
+    "Want to Watch": "want_to_watch",
+    "Watched": "watched",
+    "Favorite": "favorite",
+}
 
 
 def delete_saved_movie(username: str, tmdb_id: int) -> None:
@@ -1075,28 +1118,33 @@ def main() -> None:
             st.markdown("### Recommendations")
             for index, movie in enumerate(recommendations, start=1):
                 year_value = movie.get("release_date", "")[:4] if movie.get("release_date") else "N/A"
-                st.markdown(f"**{index}. {movie['title']} ({year_value})**")
-                if user_profile:
-                    st.caption(recommendation_reason(movie, user_profile, genre_lookup))
-                open_col, dismiss_col = st.columns([3, 1.2])
-                with open_col:
-                    if st.button("Open Details", key=f"movie_{movie['id']}", use_container_width=True):
-                        st.session_state.selected_movie_id = movie["id"]
-                        st.rerun()
-                with dismiss_col:
-                    if st.button("Not Interested", key=f"not_interested_{movie['id']}", use_container_width=True):
-                        if active_user:
-                            movie_genres = [genre_lookup[genre_id] for genre_id in movie.get("genre_ids", []) if genre_id in genre_lookup]
-                            save_not_interested_movie(
-                                username=active_user,
-                                movie=movie,
-                                genres=movie_genres,
-                                streaming_services=[],
-                            )
-                            st.success(f"{movie['title']} was marked as not interested.")
+                info_col, action_col = st.columns([1.1, 2.2], vertical_alignment="top")
+                with info_col:
+                    if movie.get("poster_path"):
+                        st.image(f"{POSTER_BASE_URL}{movie['poster_path']}", use_container_width=True)
+                with action_col:
+                    st.markdown(f"**{index}. {movie['title']} ({year_value})**")
+                    if user_profile:
+                        st.caption(recommendation_reason(movie, user_profile, genre_lookup))
+                    open_col, dismiss_col = st.columns([3, 1.2])
+                    with open_col:
+                        if st.button("Open Details", key=f"movie_{movie['id']}", use_container_width=True):
+                            st.session_state.selected_movie_id = movie["id"]
                             st.rerun()
-                        else:
-                            st.info("Log in first so the app can remember your dislikes.")
+                    with dismiss_col:
+                        if st.button("Not Interested", key=f"not_interested_{movie['id']}", use_container_width=True):
+                            if active_user:
+                                movie_genres = [genre_lookup[genre_id] for genre_id in movie.get("genre_ids", []) if genre_id in genre_lookup]
+                                save_not_interested_movie(
+                                    username=active_user,
+                                    movie=movie,
+                                    genres=movie_genres,
+                                    streaming_services=[],
+                                )
+                                st.success(f"{movie['title']} was marked as not interested.")
+                                st.rerun()
+                            else:
+                                st.info("Log in first so the app can remember your dislikes.")
             st.markdown("</div>", unsafe_allow_html=True)
 
         if current_filters:
@@ -1151,11 +1199,16 @@ def main() -> None:
             for index, movie in enumerate(title_search_results, start=1):
                 year_value = movie.get("release_date", "")[:4] if movie.get("release_date") else "N/A"
                 overview = movie.get("overview") or "No description available."
-                st.markdown(f"**{index}. {movie['title']} ({year_value})**")
-                st.caption(overview[:180] + ("..." if len(overview) > 180 else ""))
-                if st.button("Open Details", key=f"title_match_{movie['id']}", use_container_width=True):
-                    st.session_state.selected_movie_id = movie["id"]
-                    st.rerun()
+                info_col, action_col = st.columns([1.1, 2.2], vertical_alignment="top")
+                with info_col:
+                    if movie.get("poster_path"):
+                        st.image(f"{POSTER_BASE_URL}{movie['poster_path']}", use_container_width=True)
+                with action_col:
+                    st.markdown(f"**{index}. {movie['title']} ({year_value})**")
+                    st.caption(overview[:180] + ("..." if len(overview) > 180 else ""))
+                    if st.button("Open Details", key=f"title_match_{movie['id']}", use_container_width=True):
+                        st.session_state.selected_movie_id = movie["id"]
+                        st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
     else:
@@ -1164,20 +1217,25 @@ def main() -> None:
             saved_movies = fetch_saved_movies(active_user)
             if saved_movies:
                 for movie in saved_movies:
-                    st.markdown(
-                        f"""
-                        **{movie['title']}**  
-                        Release Date: {movie['release_date'] or 'N/A'}  
-                        Genres: {movie['genres'] or 'N/A'}  
-                        Streaming: {movie['streaming_services'] or 'Not listed'}  
-                        Preference: {movie['preference'].title() if movie.get('preference') else 'Liked'}  
-                        Your Rating: {movie['user_rating'] if movie['user_rating'] is not None else 'Not rated'}  
-                        Notes: {movie['notes'] or 'No notes yet'}
-                        """
-                    )
-                    if st.button("Open Movie", key=f"saved_movie_{movie['tmdb_id']}", use_container_width=True):
-                        st.session_state.selected_movie_id = movie["tmdb_id"]
-                        st.rerun()
+                    info_col, action_col = st.columns([1.1, 2.2], vertical_alignment="top")
+                    with info_col:
+                        if movie.get("poster_path"):
+                            st.image(f"{POSTER_BASE_URL}{movie['poster_path']}", use_container_width=True)
+                    with action_col:
+                        st.markdown(
+                            f"""
+                            **{movie['title']}**  
+                            Release Date: {movie['release_date'] or 'N/A'}  
+                            Genres: {movie['genres'] or 'N/A'}  
+                            Status: {movie['watch_status'].replace('_', ' ').title() if movie.get('watch_status') else 'Watched'}  
+                            Preference: {movie['preference'].title() if movie.get('preference') else 'Liked'}  
+                            Your Rating: {movie['user_rating'] if movie['user_rating'] is not None else 'Not rated'}  
+                            Notes: {movie['notes'] or 'No notes yet'}
+                            """
+                        )
+                        if st.button("Open Movie", key=f"saved_movie_{movie['tmdb_id']}", use_container_width=True):
+                            st.session_state.selected_movie_id = movie["tmdb_id"]
+                            st.rerun()
             else:
                 st.info("No saved movies yet for this username. Save a movie from Search or Recommendations to build your list.")
         else:
@@ -1223,6 +1281,12 @@ def main() -> None:
             if not active_username:
                 st.info("Enter a username above to save and manage movies in your personal database.")
             elif saved_movie is None:
+                initial_watch_status_label = st.selectbox(
+                    "Status",
+                    list(WATCH_STATUS_OPTIONS.keys()),
+                    index=1,
+                    key=f"new_watch_status_{movie_id}",
+                )
                 initial_preference = st.selectbox(
                     "How do you feel about this movie?",
                     ["Liked", "Disliked"],
@@ -1254,6 +1318,8 @@ def main() -> None:
                         runtime=details.get("runtime"),
                         streaming_services=provider_names,
                         language=details.get("original_language", "").upper() or "N/A",
+                        poster_path=details.get("poster_path"),
+                        watch_status=WATCH_STATUS_OPTIONS[initial_watch_status_label],
                         preference=initial_preference.lower(),
                         user_rating=normalized_rating,
                         notes=initial_notes,
@@ -1263,6 +1329,17 @@ def main() -> None:
             else:
                 st.success("This movie is already saved in your database.")
 
+                status_options = list(WATCH_STATUS_OPTIONS.keys())
+                current_status = next(
+                    (label for label, value in WATCH_STATUS_OPTIONS.items() if value == saved_movie.get("watch_status")),
+                    "Watched",
+                )
+                watch_status_value = st.selectbox(
+                    "Status",
+                    status_options,
+                    index=status_options.index(current_status),
+                    key=f"watch_status_{movie_id}",
+                )
                 preference_options = ["Liked", "Disliked"]
                 saved_preference = "Disliked" if saved_movie.get("preference") == "disliked" else "Liked"
                 preference_value = st.selectbox(
@@ -1293,6 +1370,7 @@ def main() -> None:
                         update_saved_movie(
                             active_username,
                             movie_id,
+                            WATCH_STATUS_OPTIONS[watch_status_value],
                             preference_value.lower(),
                             normalized_rating,
                             notes_value,
