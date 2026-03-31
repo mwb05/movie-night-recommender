@@ -949,7 +949,6 @@ def main() -> None:
 
     current_filters = st.session_state.filters
     if page == "Recommendations":
-        st.markdown('<div class="filters-card">', unsafe_allow_html=True)
         st.markdown('<div class="section-label">Filters</div>', unsafe_allow_html=True)
 
         genre_col, add_genre_col = st.columns([4, 1.3], vertical_alignment="bottom")
@@ -1009,7 +1008,6 @@ def main() -> None:
 
         language_label_value = st.selectbox("Language", [label for label, _ in language_options], index=0)
         submitted = st.button("Get Recommendations", type="primary", use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
 
         filters = {
             "genre": genre,
