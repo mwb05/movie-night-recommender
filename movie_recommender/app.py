@@ -547,6 +547,25 @@ WATCH_STATUS_OPTIONS = {
     "Favorite": "favorite",
 }
 
+WATCH_STATUS_SECTIONS = [
+    ("Favorite", "favorite"),
+    ("Watched", "watched"),
+    ("Want to Watch", "want_to_watch"),
+]
+
+
+def grouped_saved_movies(saved_movies: list[dict]) -> list[tuple[str, list[dict]]]:
+    grouped = {status: [] for _, status in WATCH_STATUS_SECTIONS}
+    for movie in saved_movies:
+        grouped.setdefault(movie.get("watch_status") or "watched", []).append(movie)
+
+    sections = []
+    for label, status in WATCH_STATUS_SECTIONS:
+        movies = grouped.get(status, [])
+        if movies:
+            sections.append((label, movies))
+    return sections
+
 
 def delete_saved_movie(username: str, tmdb_id: int) -> None:
     with get_db_connection() as conn:
@@ -787,6 +806,12 @@ def reset_state_for_new_search() -> None:
     st.session_state.search_error = ""
 
 
+def open_movie_details(movie_id: int) -> None:
+    st.session_state.previous_view = st.session_state.current_view
+    st.session_state.selected_movie_id = movie_id
+    st.session_state.current_view = "Details"
+
+
 def load_page(filters: dict, genre_map: dict[str, str], page_number: int, profile: dict | None = None) -> None:
     try:
         results, total_pages = fetch_recommendation_page(filters, genre_map, page_number, profile)
@@ -843,6 +868,7 @@ def ensure_state() -> None:
         "pin": "",
         "authenticated_user": "",
         "current_view": "Recommendations",
+        "previous_view": "Recommendations",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -944,12 +970,15 @@ def main() -> None:
     with nav_col1:
         if st.button("Recommendations", use_container_width=True, key="nav_Recommendations"):
             st.session_state.current_view = "Recommendations"
+            st.session_state.selected_movie_id = None
     with nav_col2:
         if st.button("Movie Search", use_container_width=True, key="nav_Movie Search"):
             st.session_state.current_view = "Movie Search"
+            st.session_state.selected_movie_id = None
     with nav_col3:
         if st.button("My Movies", use_container_width=True, key="nav_My Movies"):
             st.session_state.current_view = "My Movies"
+            st.session_state.selected_movie_id = None
 
     with st.sidebar:
         st.markdown("## Account")
@@ -1118,7 +1147,7 @@ def main() -> None:
             st.markdown("### Recommendations")
             for index, movie in enumerate(recommendations, start=1):
                 year_value = movie.get("release_date", "")[:4] if movie.get("release_date") else "N/A"
-                info_col, action_col = st.columns([1.1, 2.2], vertical_alignment="top")
+                info_col, action_col = st.columns([0.8, 2.6], vertical_alignment="top")
                 with info_col:
                     if movie.get("poster_path"):
                         st.image(f"{POSTER_BASE_URL}{movie['poster_path']}", use_container_width=True)
@@ -1129,7 +1158,7 @@ def main() -> None:
                     open_col, dismiss_col = st.columns([3, 1.2])
                     with open_col:
                         if st.button("Open Details", key=f"movie_{movie['id']}", use_container_width=True):
-                            st.session_state.selected_movie_id = movie["id"]
+                            open_movie_details(movie["id"])
                             st.rerun()
                     with dismiss_col:
                         if st.button("Not Interested", key=f"not_interested_{movie['id']}", use_container_width=True):
@@ -1199,7 +1228,7 @@ def main() -> None:
             for index, movie in enumerate(title_search_results, start=1):
                 year_value = movie.get("release_date", "")[:4] if movie.get("release_date") else "N/A"
                 overview = movie.get("overview") or "No description available."
-                info_col, action_col = st.columns([1.1, 2.2], vertical_alignment="top")
+                info_col, action_col = st.columns([0.8, 2.6], vertical_alignment="top")
                 with info_col:
                     if movie.get("poster_path"):
                         st.image(f"{POSTER_BASE_URL}{movie['poster_path']}", use_container_width=True)
@@ -1207,35 +1236,38 @@ def main() -> None:
                     st.markdown(f"**{index}. {movie['title']} ({year_value})**")
                     st.caption(overview[:180] + ("..." if len(overview) > 180 else ""))
                     if st.button("Open Details", key=f"title_match_{movie['id']}", use_container_width=True):
-                        st.session_state.selected_movie_id = movie["id"]
+                        open_movie_details(movie["id"])
                         st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
-    else:
+    elif page == "My Movies":
         st.markdown("### My Movies")
         if active_user:
             saved_movies = fetch_saved_movies(active_user)
-            if saved_movies:
-                for movie in saved_movies:
-                    info_col, action_col = st.columns([1.1, 2.2], vertical_alignment="top")
-                    with info_col:
-                        if movie.get("poster_path"):
-                            st.image(f"{POSTER_BASE_URL}{movie['poster_path']}", use_container_width=True)
-                    with action_col:
-                        st.markdown(
-                            f"""
-                            **{movie['title']}**  
-                            Release Date: {movie['release_date'] or 'N/A'}  
-                            Genres: {movie['genres'] or 'N/A'}  
-                            Status: {movie['watch_status'].replace('_', ' ').title() if movie.get('watch_status') else 'Watched'}  
-                            Preference: {movie['preference'].title() if movie.get('preference') else 'Liked'}  
-                            Your Rating: {movie['user_rating'] if movie['user_rating'] is not None else 'Not rated'}  
-                            Notes: {movie['notes'] or 'No notes yet'}
-                            """
-                        )
-                        if st.button("Open Movie", key=f"saved_movie_{movie['tmdb_id']}", use_container_width=True):
-                            st.session_state.selected_movie_id = movie["tmdb_id"]
-                            st.rerun()
+            if st.session_state.selected_movie_id is not None:
+                st.caption("Viewing selected movie details.")
+            elif saved_movies:
+                for section_label, section_movies in grouped_saved_movies(saved_movies):
+                    st.markdown(f"#### {section_label}")
+                    for movie in section_movies:
+                        info_col, action_col = st.columns([0.8, 2.6], vertical_alignment="top")
+                        with info_col:
+                            if movie.get("poster_path"):
+                                st.image(f"{POSTER_BASE_URL}{movie['poster_path']}", use_container_width=True)
+                        with action_col:
+                            st.markdown(
+                                f"""
+                                **{movie['title']}**  
+                                Release Date: {movie['release_date'] or 'N/A'}  
+                                Genres: {movie['genres'] or 'N/A'}  
+                                Preference: {movie['preference'].title() if movie.get('preference') else 'Liked'}  
+                                Your Rating: {movie['user_rating'] if movie['user_rating'] is not None else 'Not rated'}  
+                                Notes: {movie['notes'] or 'No notes yet'}
+                                """
+                            )
+                            if st.button("Open Movie", key=f"saved_movie_{movie['tmdb_id']}", use_container_width=True):
+                                open_movie_details(movie["tmdb_id"])
+                                st.rerun()
             else:
                 st.info("No saved movies yet for this username. Save a movie from Search or Recommendations to build your list.")
         else:
@@ -1262,7 +1294,7 @@ def main() -> None:
 
             st.markdown("### Movie Details")
             poster_path = details.get("poster_path")
-            details_col, poster_col = st.columns([2.2, 1], vertical_alignment="top")
+            details_col, poster_col = st.columns([2.6, 0.8], vertical_alignment="top")
             with details_col:
                 st.subheader(details["title"])
                 st.write(f"Release Date: {details.get('release_date', 'N/A')}")
@@ -1387,6 +1419,7 @@ def main() -> None:
 
         if st.button("Back", use_container_width=True):
             st.session_state.selected_movie_id = None
+            st.session_state.current_view = st.session_state.previous_view
             st.rerun()
 
     st.caption(
