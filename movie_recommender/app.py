@@ -919,6 +919,7 @@ def main() -> None:
         st.info("Create a username and PIN, or log in to save movies and keep your preferences private.")
 
     user_profile = build_user_preference_profile(active_user, genre_map) if active_user else None
+    page = st.sidebar.radio("Navigate", ["Recommendations", "Movie Search", "My Movies"])
 
     if active_user:
         st.markdown("### Your Taste Profile")
@@ -933,117 +934,6 @@ def main() -> None:
         else:
             st.info("Rate a few saved movies and the app will start tailoring recommendation order to your taste.")
 
-    st.markdown("### Search by Title")
-    title_search_col, title_button_col = st.columns([4, 1.3], vertical_alignment="bottom")
-    with title_search_col:
-        title_search = st.text_input("Movie Title", placeholder="Search for a movie by title")
-    with title_button_col:
-        title_submitted = st.button("Find Movie", use_container_width=True)
-
-    if title_submitted:
-        try:
-            matches = search_movie_by_title(title_search)
-            st.session_state.recommendations = []
-            if not matches:
-                st.session_state.title_search_results = []
-                st.session_state.search_error = ""
-                st.session_state.search_message = f"No movie found for '{title_search.strip()}'."
-                st.session_state.selected_movie_id = None
-            else:
-                st.session_state.title_search_results = matches
-                st.session_state.selected_movie_id = None
-                st.session_state.search_error = ""
-                st.session_state.search_message = f"Found {len(matches)} title matches."
-        except Exception as error:
-            st.session_state.search_error = str(error)
-            st.session_state.title_search_results = []
-            st.session_state.selected_movie_id = None
-
-    st.markdown('<div class="filters-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-label">Filters</div>', unsafe_allow_html=True)
-
-    genre_col, add_genre_col = st.columns([4, 1.3], vertical_alignment="bottom")
-    with genre_col:
-        genre = st.selectbox("Genre", genre_options, index=0)
-    with add_genre_col:
-        if st.button("+ Add Genre", use_container_width=True):
-            st.session_state.extra_genres_list.append(addable_genres[0])
-            st.rerun()
-
-    extra_genres = []
-    for index, current_genre in enumerate(st.session_state.extra_genres_list):
-        extra_genre_col, remove_genre_col = st.columns([4, 1.3], vertical_alignment="bottom")
-        with extra_genre_col:
-            extra_genres.append(
-                st.selectbox(
-                    f"Extra Genre {index + 1}",
-                    addable_genres,
-                    index=addable_genres.index(current_genre) if current_genre in addable_genres else 0,
-                    key=f"extra_genre_{index}",
-                )
-            )
-        with remove_genre_col:
-            if st.button("Remove", key=f"remove_extra_genre_{index}", use_container_width=True):
-                st.session_state.extra_genres_list.pop(index)
-                stale_key = f"extra_genre_{len(st.session_state.extra_genres_list)}"
-                if stale_key in st.session_state:
-                    del st.session_state[stale_key]
-                st.rerun()
-
-    st.session_state.extra_genres_list = list(extra_genres)
-
-    actor = st.text_input("Actor", placeholder="Leave blank for any actor")
-    st.markdown('<div class="section-label">Allowed Ratings</div>', unsafe_allow_html=True)
-    cert_columns = st.columns(len(certification_options))
-    selected_certifications = []
-    for cert, column in zip(certification_options, cert_columns):
-        with column:
-            if st.checkbox(cert, key=f"cert_{cert}"):
-                selected_certifications.append(cert)
-    st.markdown('<div class="section-label">Streaming Services (US)</div>', unsafe_allow_html=True)
-    provider_columns = st.columns(2)
-    selected_providers = []
-    for index, provider_name in enumerate(provider_options):
-        with provider_columns[index % 2]:
-            if st.checkbox(provider_name, key=f"provider_{provider_name}"):
-                selected_providers.append(provider_map[provider_name])
-    year_filter_col, year_value_col = st.columns(2)
-    with year_filter_col:
-        year_mode = st.selectbox("Year Filter", ["Any", "Exactly", "Or Newer", "Or Older"], index=0)
-    with year_value_col:
-        year = st.text_input(
-            "Year",
-            placeholder="Example: 2020",
-            disabled=year_mode == "Any",
-        )
-
-    language_label_value = st.selectbox("Language", [label for label, _ in language_options], index=0)
-    submitted = st.button("Get Recommendations", type="primary", use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    filters = {
-        "genre": genre,
-        "extra_genres": extra_genres,
-        "actor": actor,
-        "certifications": selected_certifications,
-        "providers": selected_providers,
-        "year_mode": year_mode,
-        "year": year,
-        "language": language_codes[language_label_value],
-    }
-
-    if submitted:
-        reset_state_for_new_search()
-        st.session_state.filters = filters
-        load_page(filters, genre_map, 1, user_profile)
-
-    current_filters = st.session_state.filters
-    if current_filters and st.button("Get 5 Different", disabled=not st.session_state.recommendations, use_container_width=True):
-        next_page = st.session_state.current_page + 1
-        if next_page > max(st.session_state.total_pages, 1):
-            next_page = 1
-        load_page(current_filters, genre_map, next_page, user_profile)
-
     if st.session_state.search_error:
         st.error(st.session_state.search_error)
     elif st.session_state.search_message:
@@ -1051,29 +941,188 @@ def main() -> None:
 
     recommendations = st.session_state.recommendations
     title_search_results = st.session_state.title_search_results
-    if title_search_results and st.session_state.selected_movie_id is None:
-        st.markdown('<div class="results-card">', unsafe_allow_html=True)
-        st.markdown("### Title Matches")
-        for index, movie in enumerate(title_search_results, start=1):
-            year_value = movie.get("release_date", "")[:4] if movie.get("release_date") else "N/A"
-            overview = movie.get("overview") or "No description available."
-            st.markdown(f"**{index}. {movie['title']} ({year_value})**")
-            st.caption(overview[:180] + ("..." if len(overview) > 180 else ""))
-            if st.button("Open Details", key=f"title_match_{movie['id']}", use_container_width=True):
-                st.session_state.selected_movie_id = movie["id"]
+
+    current_filters = st.session_state.filters
+    if page == "Recommendations":
+        st.markdown('<div class="filters-card">', unsafe_allow_html=True)
+        st.markdown('<div class="section-label">Filters</div>', unsafe_allow_html=True)
+
+        genre_col, add_genre_col = st.columns([4, 1.3], vertical_alignment="bottom")
+        with genre_col:
+            genre = st.selectbox("Genre", genre_options, index=0)
+        with add_genre_col:
+            if st.button("+ Add Genre", use_container_width=True):
+                st.session_state.extra_genres_list.append(addable_genres[0])
                 st.rerun()
+
+        extra_genres = []
+        for index, current_genre in enumerate(st.session_state.extra_genres_list):
+            extra_genre_col, remove_genre_col = st.columns([4, 1.3], vertical_alignment="bottom")
+            with extra_genre_col:
+                extra_genres.append(
+                    st.selectbox(
+                        f"Extra Genre {index + 1}",
+                        addable_genres,
+                        index=addable_genres.index(current_genre) if current_genre in addable_genres else 0,
+                        key=f"extra_genre_{index}",
+                    )
+                )
+            with remove_genre_col:
+                if st.button("Remove", key=f"remove_extra_genre_{index}", use_container_width=True):
+                    st.session_state.extra_genres_list.pop(index)
+                    stale_key = f"extra_genre_{len(st.session_state.extra_genres_list)}"
+                    if stale_key in st.session_state:
+                        del st.session_state[stale_key]
+                    st.rerun()
+
+        st.session_state.extra_genres_list = list(extra_genres)
+
+        actor = st.text_input("Actor", placeholder="Leave blank for any actor")
+        st.markdown('<div class="section-label">Allowed Ratings</div>', unsafe_allow_html=True)
+        cert_columns = st.columns(len(certification_options))
+        selected_certifications = []
+        for cert, column in zip(certification_options, cert_columns):
+            with column:
+                if st.checkbox(cert, key=f"cert_{cert}"):
+                    selected_certifications.append(cert)
+        st.markdown('<div class="section-label">Streaming Services (US)</div>', unsafe_allow_html=True)
+        provider_columns = st.columns(2)
+        selected_providers = []
+        for index, provider_name in enumerate(provider_options):
+            with provider_columns[index % 2]:
+                if st.checkbox(provider_name, key=f"provider_{provider_name}"):
+                    selected_providers.append(provider_map[provider_name])
+        year_filter_col, year_value_col = st.columns(2)
+        with year_filter_col:
+            year_mode = st.selectbox("Year Filter", ["Any", "Exactly", "Or Newer", "Or Older"], index=0)
+        with year_value_col:
+            year = st.text_input(
+                "Year",
+                placeholder="Example: 2020",
+                disabled=year_mode == "Any",
+            )
+
+        language_label_value = st.selectbox("Language", [label for label, _ in language_options], index=0)
+        submitted = st.button("Get Recommendations", type="primary", use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    if recommendations and st.session_state.selected_movie_id is None:
-        st.markdown('<div class="results-card">', unsafe_allow_html=True)
-        st.markdown("### Recommendations")
-        for index, movie in enumerate(recommendations, start=1):
-            year_value = movie.get("release_date", "")[:4] if movie.get("release_date") else "N/A"
-            label = f"{index}. {movie['title']} ({year_value})"
-            if st.button(label, key=f"movie_{movie['id']}", use_container_width=True):
-                st.session_state.selected_movie_id = movie["id"]
-                st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
+        filters = {
+            "genre": genre,
+            "extra_genres": extra_genres,
+            "actor": actor,
+            "certifications": selected_certifications,
+            "providers": selected_providers,
+            "year_mode": year_mode,
+            "year": year,
+            "language": language_codes[language_label_value],
+        }
+
+        if submitted:
+            reset_state_for_new_search()
+            st.session_state.filters = filters
+            load_page(filters, genre_map, 1, user_profile)
+
+        current_filters = st.session_state.filters
+        if current_filters and st.button("Get 5 Different", disabled=not st.session_state.recommendations, use_container_width=True):
+            next_page = st.session_state.current_page + 1
+            if next_page > max(st.session_state.total_pages, 1):
+                next_page = 1
+            load_page(current_filters, genre_map, next_page, user_profile)
+
+        if recommendations and st.session_state.selected_movie_id is None:
+            st.markdown('<div class="results-card">', unsafe_allow_html=True)
+            st.markdown("### Recommendations")
+            for index, movie in enumerate(recommendations, start=1):
+                year_value = movie.get("release_date", "")[:4] if movie.get("release_date") else "N/A"
+                label = f"{index}. {movie['title']} ({year_value})"
+                if st.button(label, key=f"movie_{movie['id']}", use_container_width=True):
+                    st.session_state.selected_movie_id = movie["id"]
+                    st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        if current_filters:
+            st.markdown("### Selected Filters")
+            genre_parts = [current_filters["genre"]] if current_filters["genre"] != "Any" else []
+            genre_parts.extend(current_filters["extra_genres"])
+            st.write(f"Genre: {', '.join(genre_parts) if genre_parts else 'Any'}")
+            st.write(f"Actor: {current_filters['actor'].strip() or 'Any'}")
+            st.write(f"Allowed Ratings: {', '.join(current_filters['certifications']) if current_filters['certifications'] else 'Any'}")
+            selected_provider_labels = [
+                provider_name for provider_name, provider_id in provider_map.items()
+                if provider_id in current_filters["providers"]
+            ]
+            st.write(f"Streaming Services: {', '.join(selected_provider_labels) if selected_provider_labels else 'Any'}")
+            if current_filters["year"].strip():
+                st.write(f"Release Year: {current_filters['year_mode']} {current_filters['year'].strip()}")
+            else:
+                st.write("Release Year: Any")
+            st.write(f"Language: {language_label(language_options, current_filters['language'])}")
+            st.write(f"Page: {max(st.session_state.current_page, 1)} of {max(st.session_state.total_pages, 1)}")
+
+    elif page == "Movie Search":
+        st.markdown("### Search by Title")
+        title_search_col, title_button_col = st.columns([4, 1.3], vertical_alignment="bottom")
+        with title_search_col:
+            title_search = st.text_input("Movie Title", placeholder="Search for a movie by title")
+        with title_button_col:
+            title_submitted = st.button("Find Movie", use_container_width=True)
+
+        if title_submitted:
+            try:
+                matches = search_movie_by_title(title_search)
+                st.session_state.recommendations = []
+                if not matches:
+                    st.session_state.title_search_results = []
+                    st.session_state.search_error = ""
+                    st.session_state.search_message = f"No movie found for '{title_search.strip()}'."
+                    st.session_state.selected_movie_id = None
+                else:
+                    st.session_state.title_search_results = matches
+                    st.session_state.selected_movie_id = None
+                    st.session_state.search_error = ""
+                    st.session_state.search_message = f"Found {len(matches)} title matches."
+            except Exception as error:
+                st.session_state.search_error = str(error)
+                st.session_state.title_search_results = []
+                st.session_state.selected_movie_id = None
+
+        if title_search_results and st.session_state.selected_movie_id is None:
+            st.markdown('<div class="results-card">', unsafe_allow_html=True)
+            st.markdown("### Title Matches")
+            for index, movie in enumerate(title_search_results, start=1):
+                year_value = movie.get("release_date", "")[:4] if movie.get("release_date") else "N/A"
+                overview = movie.get("overview") or "No description available."
+                st.markdown(f"**{index}. {movie['title']} ({year_value})**")
+                st.caption(overview[:180] + ("..." if len(overview) > 180 else ""))
+                if st.button("Open Details", key=f"title_match_{movie['id']}", use_container_width=True):
+                    st.session_state.selected_movie_id = movie["id"]
+                    st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    else:
+        st.markdown("### My Movies")
+        if active_user:
+            saved_movies = fetch_saved_movies(active_user)
+            if saved_movies:
+                for movie in saved_movies:
+                    st.markdown(
+                        f"""
+                        **{movie['title']}**  
+                        Release Date: {movie['release_date'] or 'N/A'}  
+                        Genres: {movie['genres'] or 'N/A'}  
+                        Streaming: {movie['streaming_services'] or 'Not listed'}  
+                        Preference: {movie['preference'].title() if movie.get('preference') else 'Liked'}  
+                        Your Rating: {movie['user_rating'] if movie['user_rating'] is not None else 'Not rated'}  
+                        Notes: {movie['notes'] or 'No notes yet'}
+                        """
+                    )
+                    if st.button("Open Movie", key=f"saved_movie_{movie['tmdb_id']}", use_container_width=True):
+                        st.session_state.selected_movie_id = movie["tmdb_id"]
+                        st.rerun()
+            else:
+                st.info("No saved movies yet for this username. Save a movie from Search or Recommendations to build your list.")
+        else:
+            st.info("Log in to view your saved movies.")
 
     if st.session_state.selected_movie_id is not None:
         movie_id = st.session_state.selected_movie_id
@@ -1199,53 +1248,13 @@ def main() -> None:
         except Exception as error:
             st.error(str(error))
 
-        if st.button("Back to Recommendations", use_container_width=True):
+        if st.button("Back", use_container_width=True):
             st.session_state.selected_movie_id = None
             st.rerun()
 
-    st.markdown("### Saved Movies Database")
-    if active_user:
-        saved_movies = fetch_saved_movies(active_user)
-        if saved_movies:
-            for movie in saved_movies:
-                st.markdown(
-                    f"""
-                    **{movie['title']}**  
-                    Release Date: {movie['release_date'] or 'N/A'}  
-                    Genres: {movie['genres'] or 'N/A'}  
-                    Streaming: {movie['streaming_services'] or 'Not listed'}  
-                    Preference: {movie['preference'].title() if movie.get('preference') else 'Liked'}  
-                    Your Rating: {movie['user_rating'] if movie['user_rating'] is not None else 'Not rated'}  
-                    Notes: {movie['notes'] or 'No notes yet'}
-                    """
-                )
-        else:
-            st.info("No saved movies yet for this username. Open a recommendation and click 'Save to Database' to create your first record.")
-    else:
-        st.info("Log in to view and manage your saved movies.")
-
-    if current_filters:
-        st.markdown("### Selected Filters")
-        genre_parts = [current_filters["genre"]] if current_filters["genre"] != "Any" else []
-        genre_parts.extend(current_filters["extra_genres"])
-        st.write(f"Genre: {', '.join(genre_parts) if genre_parts else 'Any'}")
-        st.write(f"Actor: {current_filters['actor'].strip() or 'Any'}")
-        st.write(f"Allowed Ratings: {', '.join(current_filters['certifications']) if current_filters['certifications'] else 'Any'}")
-        selected_provider_labels = [
-            provider_name for provider_name, provider_id in provider_map.items()
-            if provider_id in current_filters["providers"]
-        ]
-        st.write(f"Streaming Services: {', '.join(selected_provider_labels) if selected_provider_labels else 'Any'}")
-        if current_filters["year"].strip():
-            st.write(f"Release Year: {current_filters['year_mode']} {current_filters['year'].strip()}")
-        else:
-            st.write("Release Year: Any")
-        st.write(f"Language: {language_label(language_options, current_filters['language'])}")
-        st.write(f"Page: {max(st.session_state.current_page, 1)} of {max(st.session_state.total_pages, 1)}")
-
     st.caption(
         "Powered by TMDb. Streaming provider data is supplied via TMDb/JustWatch. "
-        "Saved movies are stored locally in SQLite for CRUD operations."
+        "Saved movies and user preferences are stored in PostgreSQL."
     )
 
 
