@@ -110,6 +110,17 @@ def init_db() -> None:
                 ADD COLUMN IF NOT EXISTS watch_status TEXT NOT NULL DEFAULT 'watched'
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_preferences (
+                    user_id INTEGER PRIMARY KEY REFERENCES app_users(id) ON DELETE CASCADE,
+                    favorite_genres TEXT,
+                    favorite_providers TEXT,
+                    favorite_languages TEXT,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
 
             # Migrate older username-based users into the normalized app_users table only
             # when the legacy table has the columns we expect.
@@ -173,6 +184,10 @@ def init_db() -> None:
                     """
                 )
         conn.commit()
+
+
+def split_csv_values(raw_value: str | None) -> list[str]:
+    return [item.strip() for item in (raw_value or "").split(",") if item.strip()]
 
 
 def username_exists(username: str) -> bool:
@@ -265,6 +280,61 @@ def fetch_saved_movie(username: str, tmdb_id: int) -> dict | None:
                 (username, tmdb_id),
             )
             return cur.fetchone()
+
+
+def fetch_user_preferences(username: str) -> dict:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    up.favorite_genres,
+                    up.favorite_providers,
+                    up.favorite_languages
+                FROM user_preferences up
+                JOIN app_users au ON au.id = up.user_id
+                WHERE au.username = %s
+                """,
+                (username,),
+            )
+            row = cur.fetchone()
+    return row or {"favorite_genres": "", "favorite_providers": "", "favorite_languages": ""}
+
+
+def save_user_preferences(
+    username: str,
+    favorite_genres: list[str],
+    favorite_providers: list[str],
+    favorite_languages: list[str],
+) -> None:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO user_preferences (user_id, favorite_genres, favorite_providers, favorite_languages, updated_at)
+                SELECT
+                    au.id,
+                    %s,
+                    %s,
+                    %s,
+                    NOW()
+                FROM app_users au
+                WHERE au.username = %s
+                ON CONFLICT (user_id) DO UPDATE
+                SET
+                    favorite_genres = EXCLUDED.favorite_genres,
+                    favorite_providers = EXCLUDED.favorite_providers,
+                    favorite_languages = EXCLUDED.favorite_languages,
+                    updated_at = NOW()
+                """,
+                (
+                    ", ".join(favorite_genres),
+                    ", ".join(favorite_providers),
+                    ", ".join(favorite_languages),
+                    username,
+                ),
+            )
+        conn.commit()
 
 
 def fetch_all_users() -> list[dict]:
@@ -379,6 +449,7 @@ def save_movie_record(
 
 def build_user_preference_profile(username: str, genre_map: dict[str, str]) -> dict:
     saved_movies = fetch_saved_movies(username)
+    explicit_preferences = fetch_user_preferences(username)
     saved_tmdb_ids = {movie["tmdb_id"] for movie in saved_movies}
     disliked_movies = [movie for movie in saved_movies if movie.get("preference") == "disliked"]
     liked_movies = [
@@ -425,6 +496,8 @@ def build_user_preference_profile(username: str, genre_map: dict[str, str]) -> d
             provider_counts[provider_name] += 1
 
     top_genres = [genre for genre, _ in genre_counts.most_common(3)]
+    explicit_genres = split_csv_values(explicit_preferences.get("favorite_genres"))
+    top_genres = list(dict.fromkeys(explicit_genres + top_genres))[:4]
     preferred_genre_ids = {
         int(genre_map[genre].split(",")[0])
         for genre in top_genres
@@ -436,32 +509,55 @@ def build_user_preference_profile(username: str, genre_map: dict[str, str]) -> d
         if genre in genre_map and genre_map[genre].split(",")[0].isdigit()
     }
 
+    top_languages = [language for language, _ in language_counts.most_common(2)]
+    explicit_languages = [language.lower() for language in split_csv_values(explicit_preferences.get("favorite_languages"))]
+    top_languages = list(dict.fromkeys(explicit_languages + top_languages))[:3]
+    top_streaming_services = [provider for provider, _ in provider_counts.most_common(2)]
+    explicit_providers = split_csv_values(explicit_preferences.get("favorite_providers"))
+    top_streaming_services = list(dict.fromkeys(explicit_providers + top_streaming_services))[:3]
+
     return {
         "favorite_count": len(source_movies),
         "top_genres": top_genres,
         "preferred_genre_ids": preferred_genre_ids,
         "saved_tmdb_ids": saved_tmdb_ids,
         "disliked_genre_ids": disliked_genre_ids,
-        "top_languages": [language for language, _ in language_counts.most_common(2)],
+        "top_languages": top_languages,
         "disliked_languages": [language for language, _ in disliked_language_counts.most_common(2)],
-        "top_streaming_services": [provider for provider, _ in provider_counts.most_common(2)],
+        "top_streaming_services": top_streaming_services,
+        "explicit_genres": explicit_genres,
+        "explicit_providers": explicit_providers,
+        "explicit_languages": explicit_languages,
     }
 
 
-def recommendation_reason(movie: dict, profile: dict, genre_lookup: dict[int, str]) -> str:
+def recommendation_tags(movie: dict, profile: dict, genre_lookup: dict[int, str]) -> list[str]:
     reasons = []
     movie_genres = [genre_lookup[genre_id] for genre_id in movie.get("genre_ids", []) if genre_id in genre_lookup]
     matched_genres = [genre for genre in movie_genres if genre in profile.get("top_genres", [])]
     if matched_genres:
-        reasons.append(f"matches your taste for {', '.join(matched_genres[:2])}")
+        reasons.append(f"Matches your {', '.join(matched_genres[:2])} taste")
 
     movie_language = (movie.get("original_language") or "").strip().lower()
     if movie_language and movie_language in profile.get("top_languages", []):
-        reasons.append(f"fits your preferred language ({movie_language.upper()})")
+        reasons.append(f"Preferred language: {movie_language.upper()}")
+
+    if movie.get("vote_average", 0) >= 7.5:
+        reasons.append("Strong TMDb audience score")
 
     if not reasons:
-        return "Recommended from your saved ratings and filters."
-    return "Because it " + " and ".join(reasons) + "."
+        reasons.append("Matches your saved ratings and filters")
+    return reasons[:3]
+
+
+def render_recommendation_tags(tags: list[str]) -> None:
+    if not tags:
+        return
+    chips = "".join(
+        f"<span style='display:inline-block;margin:0 0.35rem 0.35rem 0;padding:0.2rem 0.55rem;border-radius:999px;background:rgba(59,130,246,0.15);border:1px solid rgba(96,165,250,0.25);color:#dbeafe;font-size:0.8rem;'>{tag}</span>"
+        for tag in tags
+    )
+    st.markdown(chips, unsafe_allow_html=True)
 
 
 def personalize_results(results: list[dict], filters: dict, profile: dict) -> list[dict]:
@@ -698,6 +794,7 @@ def build_discover_params(
     year_value: str,
     language_value: str,
     genre_map: dict[str, str],
+    provider_map: dict[str, str],
     page_number: int,
     profile: dict | None = None,
 ) -> dict:
@@ -741,6 +838,15 @@ def build_discover_params(
     if providers:
         params["watch_region"] = "US"
         params["with_watch_providers"] = "|".join(providers)
+    elif profile and profile.get("top_streaming_services"):
+        preferred_provider_ids = [
+            provider_map[provider_name]
+            for provider_name in profile["top_streaming_services"]
+            if provider_name in provider_map
+        ]
+        if preferred_provider_ids:
+            params["watch_region"] = "US"
+            params["with_watch_providers"] = "|".join(preferred_provider_ids[:2])
 
     year_value = year_value.strip()
     if year_value:
@@ -765,6 +871,7 @@ def build_discover_params(
 def fetch_recommendation_page(
     filters: dict,
     genre_map: dict[str, str],
+    provider_map: dict[str, str],
     page_number: int,
     profile: dict | None = None,
 ) -> tuple[list[dict], int]:
@@ -780,6 +887,7 @@ def fetch_recommendation_page(
             filters["year"],
             filters["language"],
             genre_map,
+            provider_map,
             page_number,
             profile,
         ),
@@ -790,6 +898,20 @@ def fetch_recommendation_page(
     results = results[:5]
     total_available_pages = min(data.get("total_pages", 1), 500)
     return results, total_available_pages
+
+
+def fetch_similar_movie_recommendations(movie_id: int, profile: dict | None = None) -> list[dict]:
+    data = tmdb_get(
+        f"/movie/{movie_id}/recommendations",
+        {
+            "language": "en-US",
+            "page": 1,
+        },
+    )
+    results = data.get("results", [])
+    if profile:
+        results = personalize_results(results, {}, profile)
+    return results[:5]
 
 
 def language_label(language_options: list[tuple[str, str]], value: str) -> str:
@@ -812,15 +934,21 @@ def open_movie_details(movie_id: int) -> None:
     st.session_state.current_view = "Details"
 
 
-def load_page(filters: dict, genre_map: dict[str, str], page_number: int, profile: dict | None = None) -> None:
+def load_page(
+    filters: dict,
+    genre_map: dict[str, str],
+    provider_map: dict[str, str],
+    page_number: int,
+    profile: dict | None = None,
+) -> None:
     try:
-        results, total_pages = fetch_recommendation_page(filters, genre_map, page_number, profile)
+        results, total_pages = fetch_recommendation_page(filters, genre_map, provider_map, page_number, profile)
         wrapped = False
         target_page = page_number
 
         if not results and page_number != 1:
             target_page = 1
-            results, total_pages = fetch_recommendation_page(filters, genre_map, 1, profile)
+            results, total_pages = fetch_recommendation_page(filters, genre_map, provider_map, 1, profile)
             wrapped = True
 
         st.session_state.total_pages = total_pages
@@ -844,6 +972,25 @@ def load_page(filters: dict, genre_map: dict[str, str], page_number: int, profil
         st.session_state.search_error = str(error)
         st.session_state.recommendations = []
         st.session_state.selected_movie_id = None
+
+
+def load_similar_movies(movie_id: int, movie_title: str, profile: dict | None = None) -> None:
+    try:
+        results = fetch_similar_movie_recommendations(movie_id, profile)
+        st.session_state.recommendations = results
+        st.session_state.title_search_results = []
+        st.session_state.selected_movie_id = None
+        st.session_state.current_view = "Recommendations"
+        st.session_state.filters = None
+        if results:
+            st.session_state.search_error = ""
+            st.session_state.search_message = f"Because you picked {movie_title}, here are a few similar movies."
+        else:
+            st.session_state.search_error = ""
+            st.session_state.search_message = f"No similar movies were found for {movie_title}."
+    except Exception as error:
+        st.session_state.search_error = str(error)
+        st.session_state.search_message = ""
 
 
 @st.cache_data(show_spinner=False)
@@ -939,6 +1086,23 @@ def main() -> None:
         @media (max-width: 640px) {
             .hero-title {
                 font-size: 1.85rem;
+            }
+            .hero-card {
+                padding: 1.1rem 1rem 0.95rem 1rem;
+                border-radius: 18px;
+                margin-bottom: 0.7rem;
+            }
+            .hero-subtitle {
+                font-size: 0.92rem;
+            }
+            .results-card {
+                padding: 0.7rem 0.75rem 0.35rem 0.75rem;
+                border-radius: 16px;
+                margin-top: 0.7rem;
+            }
+            .section-label {
+                margin-top: 0.15rem;
+                margin-bottom: 0.2rem;
             }
         }
         </style>
@@ -1041,13 +1205,47 @@ def main() -> None:
     user_profile = build_user_preference_profile(active_user, genre_map) if active_user else None
     page = st.session_state.current_view
 
-    if active_user and user_profile and user_profile["favorite_count"]:
-        liked_genres = ", ".join(user_profile["top_genres"]) if user_profile["top_genres"] else "Still learning"
-        liked_languages = ", ".join(language.upper() for language in user_profile["top_languages"]) if user_profile["top_languages"] else "Still learning"
+    if active_user:
         with st.sidebar:
+            liked_genres = ", ".join(user_profile["top_genres"]) if user_profile and user_profile["top_genres"] else "Still learning"
+            liked_languages = ", ".join(language.upper() for language in user_profile["top_languages"]) if user_profile and user_profile["top_languages"] else "Still learning"
             st.markdown("## Your Taste")
             st.caption(f"Likes: {liked_genres}")
             st.caption(f"Languages: {liked_languages}")
+            st.markdown("## Profile")
+            saved_preferences = fetch_user_preferences(active_user)
+            selected_profile_genres = st.multiselect(
+                "Favorite Genres",
+                addable_genres,
+                default=[genre for genre in split_csv_values(saved_preferences.get("favorite_genres")) if genre in addable_genres],
+                key="profile_genres",
+            )
+            selected_profile_providers = st.multiselect(
+                "Favorite Streaming",
+                provider_options,
+                default=[provider for provider in split_csv_values(saved_preferences.get("favorite_providers")) if provider in provider_options],
+                key="profile_providers",
+            )
+            language_profile_options = [label for label, _ in language_options if label != "Any"]
+            selected_profile_languages = st.multiselect(
+                "Favorite Languages",
+                language_profile_options,
+                default=[
+                    label
+                    for label in language_profile_options
+                    if language_codes[label] in split_csv_values(saved_preferences.get("favorite_languages"))
+                ],
+                key="profile_languages",
+            )
+            if st.button("Save Profile Preferences", use_container_width=True):
+                save_user_preferences(
+                    active_user,
+                    selected_profile_genres,
+                    selected_profile_providers,
+                    [language_codes[label] for label in selected_profile_languages],
+                )
+                st.success("Profile preferences saved.")
+                st.rerun()
 
     if st.session_state.search_error:
         st.error(st.session_state.search_error)
@@ -1133,14 +1331,14 @@ def main() -> None:
         if submitted:
             reset_state_for_new_search()
             st.session_state.filters = filters
-            load_page(filters, genre_map, 1, user_profile)
+            load_page(filters, genre_map, provider_map, 1, user_profile)
 
         current_filters = st.session_state.filters
         if current_filters and st.button("Get 5 Different", disabled=not st.session_state.recommendations, use_container_width=True):
             next_page = st.session_state.current_page + 1
             if next_page > max(st.session_state.total_pages, 1):
                 next_page = 1
-            load_page(current_filters, genre_map, next_page, user_profile)
+            load_page(current_filters, genre_map, provider_map, next_page, user_profile)
 
         if recommendations and st.session_state.selected_movie_id is None:
             st.markdown('<div class="results-card">', unsafe_allow_html=True)
@@ -1154,7 +1352,7 @@ def main() -> None:
                 with action_col:
                     st.markdown(f"**{index}. {movie['title']} ({year_value})**")
                     if user_profile:
-                        st.caption(recommendation_reason(movie, user_profile, genre_lookup))
+                        render_recommendation_tags(recommendation_tags(movie, user_profile, genre_lookup))
                     open_col, dismiss_col = st.columns([3, 1.2])
                     with open_col:
                         if st.button("Open Details", key=f"movie_{movie['id']}", use_container_width=True):
@@ -1306,6 +1504,9 @@ def main() -> None:
                     st.write(f"Buy/Rent On (US): {', '.join(buy_provider_names or rent_provider_names)}")
                 st.write("Description:")
                 st.write(details.get("overview") or "No description available.")
+                if st.button("Find Similar Movies", use_container_width=True):
+                    load_similar_movies(movie_id, details["title"], user_profile if active_username else None)
+                    st.rerun()
             with poster_col:
                 if poster_path:
                     st.image(f"{POSTER_BASE_URL}{poster_path}", use_container_width=True)
